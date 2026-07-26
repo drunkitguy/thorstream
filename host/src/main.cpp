@@ -628,7 +628,11 @@ int wmain(int argc, wchar_t** argv) {
             return 0;
         }
 
+        // Named and manual-reset, so it can outlive the process that set it. A
+        // new host would then open the already-signalled event and shut down the
+        // instant it started - a clean exit code and no explanation. Clear it.
         g_shutdownEvent = CreateEventW(nullptr, TRUE, FALSE, kShutdownEventName);
+        if (g_shutdownEvent) ResetEvent(g_shutdownEvent);
         SetConsoleCtrlHandler(ConsoleHandler, TRUE);
 
         const int result = RunServer(opts);
