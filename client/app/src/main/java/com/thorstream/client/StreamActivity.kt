@@ -1,8 +1,10 @@
 package com.thorstream.client
 
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.DisplayMetrics
 import android.util.Log
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -106,10 +108,15 @@ class StreamActivity : AppCompatActivity() {
         lifecycleScope.launch {
             try {
                 connection.connect(host, Protocol.DEFAULT_CONTROL_PORT)
+                // Our panel is the ceiling: streaming a 4K window to a 1080p
+                // screen costs 4x the bandwidth and decode time for nothing the
+                // eye can resolve. The host fits the window inside this box and
+                // keeps its aspect ratio.
+                val (maxWidth, maxHeight) = displaySize()
                 connection.requestStart(
                     windowId = windowId,
-                    width = 0,   // native
-                    height = 0,
+                    width = maxWidth,
+                    height = maxHeight,
                     fps = fps,
                     bitrateKbps = bitrate,
                     codec = Protocol.CODEC_H264,
@@ -119,6 +126,17 @@ class StreamActivity : AppCompatActivity() {
                 runOnUiThread { setStatus("Could not connect: ${e.message}") }
             }
         }
+    }
+
+    /** The panel's real pixel size, ignoring any window insets. */
+    private fun displaySize(): Pair<Int, Int> {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val bounds = windowManager.currentWindowMetrics.bounds
+            return bounds.width() to bounds.height()
+        }
+        @Suppress("DEPRECATION")
+        val metrics = DisplayMetrics().also { windowManager.defaultDisplay.getRealMetrics(it) }
+        return metrics.widthPixels to metrics.heightPixels
     }
 
     private fun requestKeyframeThrottled() {

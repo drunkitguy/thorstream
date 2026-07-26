@@ -37,7 +37,14 @@ byte[]  payload          // payloadLength - 1 bytes
 | `0x07` | `GAMEPAD` | `GamepadState` (see below) |
 | `0x08` | `PING` | `uint64 clientTimeMicros` |
 
-`width`/`height` of `0` means "use the window's native size".
+`width`/`height` are an **upper bound**, not an exact size. The client knows its
+own panel; only the host knows the window's aspect ratio. The host fits the
+window inside that box, preserving aspect, never upscaling, and rounding down to
+even numbers (H.264 requires them). `0` on an axis means "unconstrained", so
+`0, 0` gives the window's native size.
+
+`STARTED` reports the size actually chosen, which is what the client must
+configure its decoder with.
 
 ### Host to client
 

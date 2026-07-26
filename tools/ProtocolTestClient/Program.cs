@@ -37,6 +37,9 @@ internal static class Program
         int port = args.Length > 1 ? int.Parse(args[1]) : 47810;
         string filter = args.Length > 2 ? args[2] : null;
         int seconds = args.Length > 3 ? int.Parse(args[3]) : 8;
+        // Optional max encode size, to exercise the host's downscaling path.
+        int maxWidth = args.Length > 4 ? int.Parse(args[4]) : 0;
+        int maxHeight = args.Length > 5 ? int.Parse(args[5]) : 0;
 
         using var tcp = new TcpClient();
         await tcp.ConnectAsync(host, port);
@@ -74,8 +77,8 @@ internal static class Program
         // START
         var start = new Writer();
         start.U64(target.Id);
-        start.U32(0);            // native width
-        start.U32(0);            // native height
+        start.U32((uint)maxWidth);   // 0 = unconstrained
+        start.U32((uint)maxHeight);
         start.U32(60);           // fps
         start.U32(30000);        // kbps
         start.U8(0);             // H.264

@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include "ffnvcodec/nvEncodeAPI.h"
+#include "scaler.h"
 
 namespace thorstream {
 namespace {
@@ -45,6 +46,7 @@ struct NvencEncoder::Impl {
     // We own a texture sized to the crop region; the capture surface itself is
     // the whole window and can change size underneath us.
     winrt::com_ptr<ID3D11Texture2D> inputTexture;
+    std::unique_ptr<TextureScaler> scaler;
     NV_ENC_REGISTERED_PTR registeredInput = nullptr;
     NV_ENC_OUTPUT_PTR bitstream = nullptr;
 
@@ -195,6 +197,12 @@ std::unique_ptr<NvencEncoder> NvencEncoder::Create(ID3D11Device* device,
         return fail("failed to create the encoder input texture");
     }
 
+    // Only needed when the encode size differs from the window, but building it
+    // up front means a resize never fails mid-stream.
+    std::string scalerError;
+    impl.scaler = TextureScaler::Create(device, context, &scalerError);
+    if (!impl.scaler) return fail("scaler: " + scalerError);
+
     NV_ENC_REGISTER_RESOURCE reg{};
     reg.version = NV_ENC_REGISTER_RESOURCE_VER;
     reg.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
@@ -244,18 +252,23 @@ bool NvencEncoder::EncodeFrame(ID3D11Texture2D* texture, const RECT& crop, uint6
     const UINT cropH = static_cast<UINT>(crop.bottom - crop.top);
     if (cropW == 0 || cropH == 0) return false;
 
-    // The window may have been resized; copy only what still fits. A full
-    // reconfigure is handled a level up, by rebuilding the encoder.
-    const UINT copyW = std::min<UINT>(cropW, static_cast<UINT>(settings_.width));
-    const UINT copyH = std::min<UINT>(cropH, static_cast<UINT>(settings_.height));
+    const bool sizeMatches = cropW == static_cast<UINT>(settings_.width) &&
+                             cropH == static_cast<UINT>(settings_.height);
 
-    const D3D11_BOX box{static_cast<UINT>(crop.left),
-                        static_cast<UINT>(crop.top),
-                        0,
-                        static_cast<UINT>(crop.left) + copyW,
-                        static_cast<UINT>(crop.top) + copyH,
-                        1};
-    impl.context->CopySubresourceRegion(impl.inputTexture.get(), 0, 0, 0, 0, texture, 0, &box);
+    if (sizeMatches) {
+        // Exact size: a straight copy beats resampling identical pixels.
+        const D3D11_BOX box{static_cast<UINT>(crop.left),
+                            static_cast<UINT>(crop.top),
+                            0,
+                            static_cast<UINT>(crop.right),
+                            static_cast<UINT>(crop.bottom),
+                            1};
+        impl.context->CopySubresourceRegion(impl.inputTexture.get(), 0, 0, 0, 0, texture, 0, &box);
+    } else if (!impl.scaler || !impl.scaler->Draw(texture, crop, impl.inputTexture.get())) {
+        // Falling back to a crop here would silently show a corner of the window
+        // rather than the whole thing, so refuse the frame instead.
+        return false;
+    }
 
     hasFrame_ = true;
     return RepeatLastFrame(timestamp, onPacket);

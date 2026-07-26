@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdio>
 
+#include "scaler.h"
 #include "window_list.h"
 
 namespace thorstream {
@@ -86,13 +87,16 @@ bool Session::StartSession(const StartRequest& request, int* outWidth, int* outH
     // rather than the raw capture surface, which includes any window chrome.
     RECT client{};
     GetClientRect(hwnd, &client);
-    int width = request.width > 0 ? request.width : client.right - client.left;
-    int height = request.height > 0 ? request.height : client.bottom - client.top;
+    const int sourceWidth = client.right - client.left;
+    const int sourceHeight = client.bottom - client.top;
 
-    // H.264 requires even dimensions.
-    width &= ~1;
-    height &= ~1;
-    if (width <= 0 || height <= 0) {
+    // The client's width/height are an upper bound, not an exact demand: it knows
+    // its screen size, not the window's aspect ratio. Fitting here keeps a 21:9
+    // window from being squashed onto a 16:9 panel.
+    int width = 0, height = 0;
+    FitPreservingAspect(sourceWidth, sourceHeight, request.width, request.height, &width, &height);
+
+    if (sourceWidth <= 0 || sourceHeight <= 0) {
         capture_.reset();
         *error = "the window has no usable client area (is it minimised?)";
         return false;
@@ -120,6 +124,11 @@ bool Session::StartSession(const StartRequest& request, int* outWidth, int* outH
 
     capture_->Start([this](const CapturedFrame& frame) { OnCapturedFrame(frame); },
                     [this] { server_.SendError("the captured window was closed"); });
+
+    if (width != sourceWidth || height != sourceHeight) {
+        wprintf(L"scaling %dx%d down to %dx%d for the client\n", sourceWidth, sourceHeight, width,
+                height);
+    }
 
     *outWidth = width;
     *outHeight = height;

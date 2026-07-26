@@ -1,0 +1,3 @@
+C:/Users/Joe/Downloads/thorstream/host/build-next/CMakeFiles/thorstream-host.dir
+C:/Users/Joe/Downloads/thorstream/host/build-next/CMakeFiles/edit_cache.dir
+C:/Users/Joe/Downloads/thorstream/host/build-next/CMakeFiles/rebuild_cache.dir

@@ -18,6 +18,7 @@ add_executable(thorstream-host
   src/net_server.cpp
   src/session.cpp
   src/gamepad_vigem.cpp
+  src/scaler.cpp
   third_party/vigem/src/ViGEmClient.cpp
 )
 
@@ -29,6 +30,7 @@ set_source_files_properties(third_party/vigem/src/ViGEmClient.cpp PROPERTIES COM
 target_compile_options(thorstream-host PRIVATE
   /W4 /permissive- /EHsc /utf-8
   /wd4100          # unreferenced formal parameter - noisy with WinRT event handlers
+  /wd4828          # vendored ViGEm headers are Latin-1, not UTF-8
 )
 
 target_compile_definitions(thorstream-host PRIVATE
@@ -46,7 +48,8 @@ target_link_libraries(thorstream-host PRIVATE
   user32
   shcore
   windowscodecs
-  setupapi   # ViGEmClient device enumeration
+  d3dcompiler  # runtime HLSL compilation for the scaler
+  setupapi     # ViGEmClient device enumeration
 )
 
 set_target_properties(thorstream-host PROPERTIES
