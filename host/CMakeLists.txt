@@ -19,6 +19,8 @@ add_executable(thorstream-host
   src/session.cpp
   src/gamepad_vigem.cpp
   src/scaler.cpp
+  src/sudovda.cpp
+  src/virtual_display.cpp
   third_party/vigem/src/ViGEmClient.cpp
 )
 
@@ -49,9 +51,17 @@ target_link_libraries(thorstream-host PRIVATE
   shcore
   windowscodecs
   d3dcompiler  # runtime HLSL compilation for the scaler
-  setupapi     # ViGEmClient device enumeration
+  setupapi     # ViGEmClient + SudoVDA device enumeration
+  ole32        # CoCreateGuid for virtual monitor ids
 )
 
 set_target_properties(thorstream-host PROPERTIES
   VS_DPI_AWARE "PerMonitor"
+
+  # Build as a GUI-subsystem binary so Windows never allocates a console for us.
+  # Hiding one after the fact still flashes it on screen at logon, which is
+  # exactly what a background host must not do. We keep wmain as the entry point
+  # and attach to the caller's console when run interactively.
+  WIN32_EXECUTABLE TRUE
+  LINK_FLAGS "/ENTRY:wmainCRTStartup"
 )

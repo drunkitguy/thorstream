@@ -23,6 +23,10 @@
 #include "encoder_nvenc.h"
 #include "gamepad_vigem.h"
 #include "save_png.h"
+#include <shlobj.h>  // IsUserAnAdmin
+
+#include "sudovda.h"
+#include "virtual_display.h"
 #include "session.h"
 #include "window_capture.h"
 #include "window_list.h"
@@ -101,26 +105,22 @@ bool RedirectOutputToLog(const std::wstring& path) {
     const auto parent = std::filesystem::path(path).parent_path();
     if (!parent.empty()) std::filesystem::create_directories(parent, ec);
 
-    // _wfsopen rather than freopen: the default sharing mode locks the file for
-    // the entire run, so nobody can tail the log of a host that is still up -
-    // exactly when you most want to read it.
-    FILE* file = _wfsopen(path.c_str(), L"a", _SH_DENYNO);
-    if (!file) {
-        WriteStartupError(L"could not open the log file [" + path + L"]\nerrno " +
+    // This is a GUI-subsystem process, so the CRT has no file descriptors 0-2 at
+    // all: _fileno(stdout) is -2, and anything built on _dup2 has nothing to
+    // attach to. freopen creates the descriptor and binds the stream in one go,
+    // which is the only approach that works both with and without a console.
+    FILE* stream = nullptr;
+    if (_wfreopen_s(&stream, path.c_str(), L"a", stdout) != 0 || !stream) {
+        WriteStartupError(L"could not redirect stdout to [" + path + L"]\nerrno " +
                           std::to_wstring(errno) + L"\n");
         return false;
     }
+    _wfreopen_s(&stream, path.c_str(), L"a", stderr);
 
-    // Point the standard descriptors at the log, leaving the CRT's own stdout
-    // stream object intact. Grafting FILE structs around instead turned out to
-    // be fragile enough to silently produce empty logs.
-    const int logFd = _fileno(file);
-    if (logFd < 0 || _dup2(logFd, _fileno(stdout)) != 0) {
-        WriteStartupError(L"could not redirect stdout to [" + path + L"]\n");
-        fclose(file);
-        return false;
-    }
-    _dup2(logFd, _fileno(stderr));
+    // Known limitation: freopen holds the file exclusively, so the log cannot be
+    // read while the host is running. Re-pointing the descriptor at a shared
+    // handle afterwards was tried and silently produced an empty log, which is a
+    // far worse failure than having to stop the host to read it.
     return true;
 }
 
@@ -144,8 +144,40 @@ void PrintLocalAddresses(int port) {
     freeaddrinfo(results);
 }
 
+// Named so a second invocation can ask a running host to shut down cleanly.
+// With no console there is no Ctrl+C to rely on, and killing the process strands
+// the virtual gamepad and any display changes.
+constexpr wchar_t kShutdownEventName[] = L"Local\\thorstream-host-shutdown";
+
 // Signalled by the console control handler so shutdown runs on the main thread.
 HANDLE g_shutdownEvent = nullptr;
+
+// Asks an already-running host to stop, and waits for it to actually go.
+int RunStop() {
+    const HANDLE event = OpenEventW(EVENT_MODIFY_STATE, FALSE, kShutdownEventName);
+    if (!event) {
+        wprintf(L"No running thorstream host found.\n");
+        return 1;
+    }
+    SetEvent(event);
+    CloseHandle(event);
+    wprintf(L"Stop requested; waiting for it to exit...\n");
+
+    // The singleton mutex is only released when the process really exits, so
+    // acquiring it is a reliable "the old host is gone" signal.
+    for (int i = 0; i < 100; ++i) {
+        Sleep(100);
+        const HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\thorstream-host-singleton");
+        if (mutex && GetLastError() != ERROR_ALREADY_EXISTS) {
+            CloseHandle(mutex);
+            wprintf(L"Stopped.\n");
+            return 0;
+        }
+        if (mutex) CloseHandle(mutex);
+    }
+    wprintf(L"It did not exit within 10 seconds.\n");
+    return 1;
+}
 
 BOOL WINAPI ConsoleHandler(DWORD signal) {
     switch (signal) {
@@ -163,6 +195,82 @@ BOOL WINAPI ConsoleHandler(DWORD signal) {
         default:
             return FALSE;
     }
+}
+
+// Reports whether this process can reach the virtual display driver at all.
+// Run it unelevated: if the driver needs admin, that decides how the host has to
+// be installed, and it is far better to learn that here than mid-session.
+int RunVirtualDisplayProbe() {
+    wprintf(L"=== SudoVDA probe ===\n");
+    wprintf(L"Elevated          : %hs\n", IsUserAnAdmin() ? "yes" : "no");
+
+    const HANDLE device = sudovda::OpenDriver();
+    if (device == INVALID_HANDLE_VALUE) {
+        wprintf(L"Open driver       : FAILED (error %lu)\n", GetLastError());
+        wprintf(L"\nThe driver is either not installed or not reachable from this process.\n");
+        return 1;
+    }
+    wprintf(L"Open driver       : ok\n");
+
+    sudovda::ProtocolVersion version{};
+    if (sudovda::QueryProtocolVersion(device, &version)) {
+        wprintf(L"Protocol version  : %u.%u.%u%hs\n", version.major, version.minor,
+                version.incremental, version.testBuild ? " (test build)" : "");
+    } else {
+        wprintf(L"Protocol version  : FAILED (error %lu)\n", GetLastError());
+    }
+
+    sudovda::WatchdogOut watchdog{};
+    if (sudovda::QueryWatchdog(device, &watchdog)) {
+        wprintf(L"Watchdog          : timeout %us, countdown %us\n", watchdog.timeout,
+                watchdog.countdown);
+    } else {
+        wprintf(L"Watchdog          : FAILED (error %lu)\n", GetLastError());
+    }
+
+    wprintf(L"Ping              : %hs\n", sudovda::Ping(device) ? "ok" : "FAILED");
+
+    CloseHandle(device);
+    return 0;
+}
+
+// Creates a virtual display, holds it briefly, then removes it. Touches nothing
+// else - no topology changes - so it is safe to run while you are using the PC.
+int RunVirtualDisplayTest(int width, int height, int refresh, int seconds) {
+    VirtualDisplayRequest request;
+    request.width = width;
+    request.height = height;
+    request.refreshRate = refresh;
+
+    wprintf(L"Creating a %dx%d @ %dHz virtual display...\n", width, height, refresh);
+
+    std::string error;
+    auto display = VirtualDisplay::Create(request, &error);
+    if (!display) {
+        wprintf(L"FAILED: %hs\n", error.c_str());
+        return 1;
+    }
+
+    wprintf(L"Created as %s\n", display->DeviceName().c_str());
+    wprintf(L"Holding for %d seconds - it should appear in Display settings.\n", seconds);
+
+    for (int i = 0; i < seconds; ++i) {
+        Sleep(1000);
+        DEVMODEW mode{};
+        mode.dmSize = sizeof(mode);
+        if (EnumDisplaySettingsW(display->DeviceName().c_str(), ENUM_CURRENT_SETTINGS, &mode)) {
+            wprintf(L"  t=%2ds  %ux%u @ %uHz\n", i + 1, mode.dmPelsWidth, mode.dmPelsHeight,
+                    mode.dmDisplayFrequency);
+        } else {
+            wprintf(L"  t=%2ds  (not yet reporting a mode)\n", i + 1);
+        }
+    }
+
+    wprintf(L"Removing...\n");
+    display.reset();
+    Sleep(1000);
+    wprintf(L"Done.\n");
+    return 0;
 }
 
 // Drives the virtual pad directly, with no networking in the way, so a failure
@@ -259,9 +367,17 @@ int RunServer(const Options& opts) {
 
     wprintf(L"\nShutting down...\n");
     session.Shutdown();
+    wprintf(L"  session stopped\n");
     gamepad.reset();
+    wprintf(L"  gamepad released\n");
     wprintf(L"Stopped cleanly.\n");
-    return 0;
+
+    // Exit without unwinding the CRT. The capture and encoder machinery keeps
+    // WinRT threadpool threads alive, and waiting on them at exit is what left
+    // the process hanging after it had already stopped serving. Everything that
+    // matters - the virtual pad, the capture session - has been released above.
+    fflush(stdout);
+    _exit(0);
 }
 
 void PrintWindows(const std::vector<WindowEntry>& windows) {
@@ -451,9 +567,17 @@ int wmain(int argc, wchar_t** argv) {
         else if (arg == L"--fps") opts.fpsCap = next();
         else if (arg == L"--port") opts.port = next();
         else if (arg == L"--serve") opts.serve = true;
+        // Retained so an older installed task keeps working; the binary is now a
+
+        // GUI-subsystem app and never has a console to hide.
+
         else if (arg == L"--hidden") opts.hidden = true;
         else if (arg == L"--log") { if (i + 1 < argc) opts.logPath = argv[++i]; }
         else if (arg == L"--gamepad-selftest") return RunGamepadSelfTest();
+        else if (arg == L"--stop") return RunStop();
+
+        else if (arg == L"--vdisplay-probe") return RunVirtualDisplayProbe();
+        else if (arg == L"--vdisplay-test") return RunVirtualDisplayTest(1920, 1080, 60, 10);
         else if (arg == L"--encode") opts.encode = true;
         else if (arg == L"--hevc") { opts.hevc = true; opts.encode = true; }
         else if (arg == L"--full-range") opts.fullRange = true;
@@ -465,12 +589,17 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (opts.seconds <= 0) opts.seconds = 10;
 
-    // Hide the console window rather than FreeConsole(). Detaching leaves the CRT
-    // holding streams with no valid handles, and reattaching them to a file is
-    // fragile enough that it silently produced empty logs. Hiding the window is
-    // what "run in the background" actually needs, and stdout stays valid.
-    if (opts.hidden) {
-        if (HWND console = GetConsoleWindow()) ShowWindow(console, SW_HIDE);
+    // This is a GUI-subsystem binary, so we start with no console at all. When a
+    // log file is requested we never want one; otherwise attach to whatever
+    // console launched us so running the tool by hand still prints, and fall back
+    // to allocating one if there is no parent console to borrow.
+    if (opts.logPath.empty()) {
+        if (AttachConsole(ATTACH_PARENT_PROCESS) || AllocConsole()) {
+            FILE* stream = nullptr;
+            freopen_s(&stream, "CONOUT$", "w", stdout);
+            freopen_s(&stream, "CONOUT$", "w", stderr);
+            freopen_s(&stream, "CONIN$", "r", stdin);
+        }
     }
 
     // Redirect before the first byte of output, so an autostarted host records
@@ -499,7 +628,7 @@ int wmain(int argc, wchar_t** argv) {
             return 0;
         }
 
-        g_shutdownEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        g_shutdownEvent = CreateEventW(nullptr, TRUE, FALSE, kShutdownEventName);
         SetConsoleCtrlHandler(ConsoleHandler, TRUE);
 
         const int result = RunServer(opts);

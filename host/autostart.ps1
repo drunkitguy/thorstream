@@ -45,6 +45,19 @@ function Resolve-Exe {
     throw "Could not find thorstream-host.exe. Build it first, or pass -ExePath."
 }
 
+# Ask the host to shut down rather than killing it: a hard kill strands the
+# virtual gamepad and would leave any display changes applied.
+function Stop-Host {
+    if (-not (Get-Process thorstream-host -ErrorAction SilentlyContinue)) { return }
+    $exe = $null
+    try { $exe = Resolve-Exe -Provided $ExePath } catch { }
+    if ($exe) { & $exe --stop | Out-Null }
+
+    # Only escalate if it ignored the polite request.
+    Start-Sleep -Milliseconds 500
+    Get-Process thorstream-host -ErrorAction SilentlyContinue | Stop-Process -Force
+}
+
 function Show-Status {
     $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     if (-not $task) {
@@ -85,7 +98,7 @@ if ($Uninstall) {
     } else {
         Write-Host "No '$taskName' task was installed."
     }
-    Get-Process thorstream-host -ErrorAction SilentlyContinue | Stop-Process -Force
+    Stop-Host
     return
 }
 
@@ -94,8 +107,9 @@ if (-not $Install) { Show-Status; return }
 $exe = Resolve-Exe -Provided $ExePath
 New-Item -ItemType Directory -Force -Path (Split-Path $logPath) | Out-Null
 
+# No --hidden needed: the host is a GUI-subsystem binary and never allocates a
+# console, so nothing flashes on screen at logon.
 $arguments = "--serve --port $Port --log `"$logPath`""
-if (-not $ShowWindow) { $arguments += " --hidden" }
 if ($FullRange) { $arguments += " --full-range" }
 
 $action = New-ScheduledTaskAction -Execute $exe -Argument $arguments -WorkingDirectory (Split-Path $exe)
@@ -122,7 +136,7 @@ Write-Host "  Runs    : $exe $arguments"
 Write-Host "  Trigger : at logon for $env:USERNAME"
 Write-Host ""
 
-Get-Process thorstream-host -ErrorAction SilentlyContinue | Stop-Process -Force
+Stop-Host
 Start-ScheduledTask -TaskName $taskName
 Start-Sleep -Seconds 4
 Show-Status
