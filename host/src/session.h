@@ -25,6 +25,13 @@ public:
     bool Serve(uint16_t controlPort, std::string* error);
     void Shutdown();
 
+    // Read by the web console. All of these are atomics or atomics behind the
+    // stream server, so they are safe to sample from its thread.
+    bool HasClient() const { return server_.HasClient(); }
+    bool IsStreaming() const { return server_.IsStreaming(); }
+    uint64_t FramesSent() const { return framesSent_.load(); }
+    uint64_t BytesSent() const { return bytesSent_.load(); }
+
     // Set by main once ViGEm is available; may be null.
     std::function<void(const protocol::GamepadState&)> onGamepad;
     // Invoked when a session ends, so held buttons can be released.
@@ -49,6 +56,11 @@ private:
     // Games can take a very long time to show a window: shader compilation,
     // launcher updates, anti-cheat startup.
     static constexpr int kLaunchTimeoutSeconds = 180;
+
+    // The session reconnect is quick when it works at all, so a long wait here
+    // would only delay telling the user that it did not.
+    static constexpr int kUnlockTimeoutSeconds = 15;
+
     void StopSession();
     void OnCapturedFrame(const CapturedFrame& frame);
 

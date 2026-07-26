@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -30,8 +31,10 @@
 #include "sudovda.h"
 #include "virtual_display.h"
 #include "discovery.h"
+#include "session_lock.h"
 #include "display_topology.h"
 #include "session.h"
+#include "web_console.h"
 #include "window_capture.h"
 #include "window_list.h"
 
@@ -51,6 +54,8 @@ struct Options {
     bool hidden = false;
     bool fullRange = false;
     std::wstring logPath;
+    // Diagnostic modes run after logging is set up, so --log works for them too.
+    std::wstring testMode;
 };
 
 // Distinct exit codes, because an autostarted host has nowhere to print.
@@ -121,6 +126,13 @@ bool RedirectOutputToLog(const std::wstring& path) {
     }
     _wfreopen_s(&stream, path.c_str(), L"a", stderr);
 
+    // Without a console, stdout is fully buffered, so the log stayed empty for
+    // kilobytes at a time and looked identical to a host that had died on
+    // startup. Unbuffered costs nothing at this volume and means the log is
+    // always current - including while the host is still running.
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    setvbuf(stderr, nullptr, _IONBF, 0);
+
     // Known limitation: freopen holds the file exclusively, so the log cannot be
     // read while the host is running. Re-pointing the descriptor at a shared
     // handle afterwards was tried and silently produced an empty log, which is a
@@ -129,23 +141,29 @@ bool RedirectOutputToLog(const std::wstring& path) {
 }
 
 // So the user knows what address to type into the handheld.
-void PrintLocalAddresses(int port) {
+std::vector<std::string> LocalAddressList(int port) {
+    std::vector<std::string> addresses;
     char hostname[256] = {};
-    if (gethostname(hostname, sizeof(hostname)) != 0) return;
+    if (gethostname(hostname, sizeof(hostname)) != 0) return addresses;
 
     addrinfo hints{};
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
     addrinfo* results = nullptr;
-    if (getaddrinfo(hostname, nullptr, &hints, &results) != 0) return;
+    if (getaddrinfo(hostname, nullptr, &hints, &results) != 0) return addresses;
 
     for (const addrinfo* it = results; it; it = it->ai_next) {
         char address[INET_ADDRSTRLEN] = {};
         const auto* in = reinterpret_cast<const sockaddr_in*>(it->ai_addr);
         inet_ntop(AF_INET, &in->sin_addr, address, sizeof(address));
-        wprintf(L"    %hs:%d\n", address, port);
+        addresses.push_back(std::string(address) + ":" + std::to_string(port));
     }
     freeaddrinfo(results);
+    return addresses;
+}
+
+void PrintLocalAddresses(int port) {
+    for (const auto& address : LocalAddressList(port)) wprintf(L"    %hs\n", address.c_str());
 }
 
 // Named so a second invocation can ask a running host to shut down cleanly.
@@ -386,6 +404,121 @@ int RunCoverTest() {
     return converted > 0 ? 0 : 1;
 }
 
+// Locks the machine, then unlocks it the way a game launch would. Locking is the
+// only part that needs a person, and doing it here rather than asking means the
+// unlock attempt starts a known number of milliseconds later - the previous two
+// attempts at this failed purely because the prompt to lock arrived after the
+// measurement window had already closed.
+int RunUnlockTest() {
+    wprintf(L"=== unlock test ===\n");
+    wprintf(L"Helper task installed: %s\n", SessionLock::UnlockHelperInstalled() ? L"yes" : L"no");
+    if (!SessionLock::UnlockHelperInstalled()) {
+        wprintf(L"Run: autostart.ps1 -InstallUnlock  (from an elevated PowerShell)\n");
+        return 1;
+    }
+
+    wprintf(L"Locking the workstation in 2 seconds...\n");
+    fflush(stdout);
+    Sleep(2000);
+
+    if (!LockWorkStation()) {
+        wprintf(L"LockWorkStation failed (error %lu)\n", GetLastError());
+        return 1;
+    }
+
+    // The secure desktop does not arrive instantly, and unlocking before the
+    // lock has landed would prove nothing.
+    for (int i = 0; i < 40 && !SessionLock::IsLocked(); ++i) Sleep(250);
+    if (!SessionLock::IsLocked()) {
+        wprintf(L"The session never reported as locked; test inconclusive.\n");
+        return 1;
+    }
+    wprintf(L"Locked. Waiting 5s, then unlocking without a password...\n");
+    fflush(stdout);
+    Sleep(5000);
+
+    const auto start = std::chrono::steady_clock::now();
+    std::string error;
+    const bool unlocked = SessionLock::RequestUnlock(20, &error);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - start)
+                             .count();
+
+    if (!unlocked) {
+        wprintf(L"FAILED after %lldms: %hs\n", elapsed, error.c_str());
+        wprintf(L"The machine is still locked - sign in normally.\n");
+        return 1;
+    }
+    wprintf(L"UNLOCKED in %lldms, no password involved.\n", elapsed);
+    return 0;
+}
+
+// Measures capture rate across a lock, with the streamed window on a virtual
+// display. The question this answers: does a virtual display keep compositing
+// when the physical session is locked? If it does, streaming to a handheld from
+// a locked PC becomes possible without ever touching the user's credentials.
+int RunLockTest(int seconds) {
+    auto device = CreateGraphicsDevice();
+
+    VirtualDisplayRequest request;
+    request.width = 1920;
+    request.height = 1080;
+    request.refreshRate = 60;
+
+    std::string error;
+    auto display = VirtualDisplay::Create(request, &error);
+    if (!display) {
+        wprintf(L"No virtual display (%hs); measuring on the physical desktop instead.\n",
+                error.c_str());
+    } else {
+        wprintf(L"Virtual display %s\n", display->DeviceName().c_str());
+        DisplayTopology::Attach(display->DeviceName(), request.width, request.height,
+                                request.refreshRate, &error);
+    }
+
+    const auto windows = EnumerateCapturableWindows();
+    const WindowEntry* target = FindWindowByFilter(windows, L"FAKE GAME");
+    if (!target) {
+        wprintf(L"Start D3DTestWindow first - no \"FAKE GAME\" window found.\n");
+        return 1;
+    }
+
+    // Put it on the virtual display so the lock screen, which takes over the
+    // physical ones, is not covering what we are capturing.
+    if (display) {
+        DEVMODEW mode{};
+        mode.dmSize = sizeof(mode);
+        if (EnumDisplaySettingsExW(display->DeviceName().c_str(), ENUM_CURRENT_SETTINGS, &mode, 0)) {
+            SetWindowPos(target->hwnd, HWND_TOP, mode.dmPosition.x, mode.dmPosition.y,
+                         request.width, request.height, SWP_NOACTIVATE);
+            wprintf(L"Moved the window onto the virtual display at %d,%d\n", mode.dmPosition.x,
+                    mode.dmPosition.y);
+        }
+    }
+
+    CaptureOptions options;
+    options.cropToClientArea = true;
+    WindowCapture capture(device, target->hwnd, options);
+
+    std::atomic<uint64_t> frames{0};
+    capture.Start([&](const CapturedFrame&) { frames.fetch_add(1); }, [] {});
+
+    wprintf(L"\nMeasuring for %d seconds. LOCK THE PC partway through.\n\n", seconds);
+
+    uint64_t previous = 0;
+    for (int i = 0; i < seconds; ++i) {
+        Sleep(1000);
+        const uint64_t total = frames.load();
+        wprintf(L"  t=%2ds  %3llu fps   session %hs\n", i + 1,
+                static_cast<unsigned long long>(total - previous),
+                SessionLock::IsLocked() ? "LOCKED" : "unlocked");
+        previous = total;
+    }
+
+    capture.Stop();
+    return 0;
+}
+
 // Drives the virtual pad directly, with no networking in the way, so a failure
 // here points at ViGEm rather than at the protocol.
 int RunGamepadSelfTest() {
@@ -431,55 +564,143 @@ int RunGamepadSelfTest() {
 
 int RunServer(const Options& opts) {
     auto device = CreateGraphicsDevice();
-    Session session(device);
-    session.fullRange = opts.fullRange;
     if (opts.fullRange) wprintf(L"Encoding full-range colour.\n");
 
-    // Optional: without ViGEmBus we can still stream video, just not send input.
+    // Created once for the life of the process rather than per-session, so
+    // stopping and starting from the web console does not repeatedly plug and
+    // unplug a virtual controller on the ViGEm bus.
     std::string gamepadError;
     auto gamepad = VirtualGamepad::Create(&gamepadError);
+    std::string gamepadStatus;
     if (gamepad) {
         const int slot = gamepad->XInputSlot();
         if (slot >= 0) {
             wprintf(L"Virtual Xbox 360 pad ready (XInput slot %d).\n", slot);
+            gamepadStatus = "ready (XInput slot " + std::to_string(slot) + ")";
         } else {
             wprintf(L"Virtual Xbox 360 pad attached but the driver has not assigned it an "
                     L"XInput slot - games will not see it. Stale virtual pads from a host that "
                     L"did not shut down cleanly are the usual cause; a reboot clears them.\n");
+            gamepadStatus = "attached but no XInput slot - a reboot usually clears this";
         }
-        // Report the first rejection rather than dropping input silently: a
-        // controller that does nothing with no explanation is the worst outcome.
-        session.onGamepad = [pad = gamepad.get(), warned = std::make_shared<bool>(false)](
-                                const protocol::GamepadState& state) {
-            std::string submitError;
-            if (!pad->Submit(state, &submitError) && !*warned) {
-                *warned = true;
-                wprintf(L"virtual pad rejected input: %hs\n", submitError.c_str());
-            }
-        };
-        session.onReleaseInput = [pad = gamepad.get()] { pad->ReleaseAll(); };
     } else {
         wprintf(L"Gamepad input disabled: %hs\n", gamepadError.c_str());
+        gamepadStatus = "unavailable: " + gamepadError;
     }
 
-    std::string error;
-    if (!session.Serve(static_cast<uint16_t>(opts.port), &error)) {
-        wprintf(L"Failed to start the server: %hs\n", error.c_str());
+    // The streaming service is now something that can be taken down and brought
+    // back up while the process keeps running, because the web console offers
+    // exactly that. Guarded because the console's thread drives it.
+    std::mutex serviceMutex;
+    std::unique_ptr<Session> session;
+    static DiscoveryResponder discoveryResponder;
+    const auto processStart = std::chrono::steady_clock::now();
+    auto serveStart = processStart;
+    std::string lastError;
+
+    auto startService = [&](std::string* error) -> bool {
+        std::lock_guard<std::mutex> lock(serviceMutex);
+        if (session) return true;
+
+        auto fresh = std::make_unique<Session>(device);
+        fresh->fullRange = opts.fullRange;
+        if (gamepad) {
+            // Report the first rejection rather than dropping input silently: a
+            // controller that does nothing with no explanation is the worst outcome.
+            fresh->onGamepad = [pad = gamepad.get(), warned = std::make_shared<bool>(false)](
+                                   const protocol::GamepadState& state) {
+                std::string submitError;
+                if (!pad->Submit(state, &submitError) && !*warned) {
+                    *warned = true;
+                    wprintf(L"virtual pad rejected input: %hs\n", submitError.c_str());
+                }
+            };
+            fresh->onReleaseInput = [pad = gamepad.get()] { pad->ReleaseAll(); };
+        }
+
+        // lastError is read by the status callback under this same lock, so it
+        // is only ever written here and in stopService.
+        if (!fresh->Serve(static_cast<uint16_t>(opts.port), error)) {
+            lastError = *error;
+            return false;
+        }
+        lastError.clear();
+        session = std::move(fresh);
+        serveStart = std::chrono::steady_clock::now();
+
+        // Answer discovery probes so the handheld can find this PC by itself.
+        // Not fatal if it fails: typing an address still works.
+        std::string discoveryError;
+        if (discoveryResponder.Start(discovery::kDefaultPort, static_cast<uint16_t>(opts.port),
+                                     &discoveryError)) {
+            wprintf(L"Discoverable on the local network (udp %d).\n", discovery::kDefaultPort);
+        } else {
+            wprintf(L"Discovery unavailable: %hs\n", discoveryError.c_str());
+        }
+
+        wprintf(L"Listening for a client on port %d.\n", opts.port);
+        return true;
+    };
+
+    auto stopService = [&] {
+        std::lock_guard<std::mutex> lock(serviceMutex);
+        lastError.clear();
+        if (!session) return;
+        wprintf(L"Stopping the streaming service...\n");
+        discoveryResponder.Stop();
+        session->Shutdown();
+        session.reset();
+        // Anything the client was holding down is not coming back up on its own.
+        if (gamepad) gamepad->ReleaseAll();
+        wprintf(L"Streaming service stopped; the web console is still up.\n");
+    };
+
+    if (!startService(&lastError)) {
+        wprintf(L"Failed to start the server: %hs\n", lastError.c_str());
         return 3;
     }
 
-    // Answer discovery probes so the handheld can find this PC by itself. Not
-    // fatal if it fails: typing an address still works.
-    static DiscoveryResponder discoveryResponder;
-    std::string discoveryError;
-    if (discoveryResponder.Start(discovery::kDefaultPort, static_cast<uint16_t>(opts.port),
-                                 &discoveryError)) {
-        wprintf(L"Discoverable on the local network (udp %d).\n", discovery::kDefaultPort);
+    // A background GUI-subsystem process is otherwise completely opaque, so this
+    // is the only way to see what it is doing without stopping it first.
+    WebConsole console;
+    console.status = [&]() -> HostStatus {
+        std::lock_guard<std::mutex> lock(serviceMutex);
+        const auto now = std::chrono::steady_clock::now();
+        HostStatus status;
+        status.serving = session != nullptr;
+        status.lastError = lastError;
+        status.controlPort = opts.port;
+        status.uptimeSeconds = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::seconds>(now - processStart).count());
+        status.servingSeconds = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::seconds>(now - serveStart).count());
+        status.gamepad = gamepadStatus;
+        status.addresses = LocalAddressList(opts.port);
+        if (session) {
+            status.clientConnected = session->HasClient();
+            status.streaming = session->IsStreaming();
+            status.framesSent = session->FramesSent();
+            status.bytesSent = session->BytesSent();
+        }
+        return status;
+    };
+    console.onStart = [&](std::string* error) { return startService(error); };
+    console.onStop = [&] { stopService(); };
+    console.onRestart = [&](std::string* error) {
+        stopService();
+        return startService(error);
+    };
+
+    std::string consoleError;
+    if (console.Start(web::kDefaultPort, &consoleError)) {
+        wprintf(L"Web console on http://localhost:%d/\n", web::kDefaultPort);
+        for (const auto& address : LocalAddressList(web::kDefaultPort)) {
+            wprintf(L"    http://%hs/\n", address.c_str());
+        }
     } else {
-        wprintf(L"Discovery unavailable: %hs\n", discoveryError.c_str());
+        wprintf(L"Web console unavailable: %hs\n", consoleError.c_str());
     }
 
-    wprintf(L"Listening for a client on port %d.\n", opts.port);
     wprintf(L"  Point the Thor client at one of these:\n");
     PrintLocalAddresses(opts.port);
     wprintf(L"\nPress Ctrl+C to stop.\n\n");
@@ -490,7 +711,8 @@ int RunServer(const Options& opts) {
     WaitForSingleObject(g_shutdownEvent, INFINITE);
 
     wprintf(L"\nShutting down...\n");
-    session.Shutdown();
+    console.Stop();
+    stopService();
     wprintf(L"  session stopped\n");
     gamepad.reset();
     wprintf(L"  gamepad released\n");
@@ -697,14 +919,17 @@ int wmain(int argc, wchar_t** argv) {
 
         else if (arg == L"--hidden") opts.hidden = true;
         else if (arg == L"--log") { if (i + 1 < argc) opts.logPath = argv[++i]; }
-        else if (arg == L"--gamepad-selftest") return RunGamepadSelfTest();
+        else if (arg == L"--gamepad-selftest") opts.testMode = L"gamepad-selftest";
         else if (arg == L"--stop") return RunStop();
 
-        else if (arg == L"--cover-test") return RunCoverTest();
-        else if (arg == L"--vdisplay-probe") return RunVirtualDisplayProbe();
-        else if (arg == L"--vdisplay-test") return RunVirtualDisplayTest(1920, 1080, 60, 10);
+        else if (arg == L"--cover-test") opts.testMode = L"cover-test";
+        else if (arg == L"--lock-test") opts.testMode = L"lock-test";
+        else if (arg == L"--unlock-now") opts.testMode = L"unlock-now";
+        else if (arg == L"--unlock-test") opts.testMode = L"unlock-test";
+        else if (arg == L"--vdisplay-probe") opts.testMode = L"vdisplay-probe";
+        else if (arg == L"--vdisplay-test") opts.testMode = L"vdisplay-test";
 
-        else if (arg == L"--display-switch-test") return RunDisplaySwitchTest(1920, 1080, 8);
+        else if (arg == L"--display-switch-test") opts.testMode = L"display-switch-test";
         else if (arg == L"--encode") opts.encode = true;
         else if (arg == L"--hevc") { opts.hevc = true; opts.encode = true; }
         else if (arg == L"--full-range") opts.fullRange = true;
@@ -741,6 +966,20 @@ int wmain(int argc, wchar_t** argv) {
     // Unbuffered: a server you cannot tell is running is a server you assume is
     // broken. Safe to do now that stdout is known-good.
     setvbuf(stdout, nullptr, _IONBF, 0);
+
+    // Diagnostic modes run here, after logging is configured, so --log captures
+    // them. Dispatching them during argument parsing meant their output went to
+    // a detached console and was simply lost.
+    if (!opts.testMode.empty()) {
+        if (opts.testMode == L"gamepad-selftest") return RunGamepadSelfTest();
+        if (opts.testMode == L"cover-test") return RunCoverTest();
+        if (opts.testMode == L"lock-test") return RunLockTest(opts.seconds > 10 ? opts.seconds : 40);
+        if (opts.testMode == L"unlock-now") return SessionLock::UnlockNow() ? 0 : 1;
+        if (opts.testMode == L"unlock-test") return RunUnlockTest();
+        if (opts.testMode == L"vdisplay-probe") return RunVirtualDisplayProbe();
+        if (opts.testMode == L"vdisplay-test") return RunVirtualDisplayTest(1920, 1080, 60, 10);
+        if (opts.testMode == L"display-switch-test") return RunDisplaySwitchTest(1920, 1080, 8);
+    }
 
     wprintf(L"=== thorstream host ===\n");
 

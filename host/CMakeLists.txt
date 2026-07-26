@@ -25,6 +25,8 @@ add_executable(thorstream-host
   src/game_library.cpp
   src/cover_art.cpp
   src/discovery.cpp
+  src/session_lock.cpp
+  src/web_console.cpp
   src/input_injector.cpp
   third_party/vigem/src/ViGEmClient.cpp
 )
@@ -58,6 +60,7 @@ target_link_libraries(thorstream-host PRIVATE
   d3dcompiler  # runtime HLSL compilation for the scaler
   setupapi     # ViGEmClient + SudoVDA device enumeration
   ole32        # CoCreateGuid for virtual monitor ids
+  wtsapi32     # WTSConnectSession, for unlocking a locked session
 )
 
 set_target_properties(thorstream-host PROPERTIES

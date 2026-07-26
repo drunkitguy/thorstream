@@ -5,6 +5,7 @@
 #include <thread>
 
 #include "scaler.h"
+#include "session_lock.h"
 #include "window_list.h"
 
 namespace thorstream {
@@ -213,6 +214,21 @@ bool Session::LaunchAndStream(const LaunchRequest& request, int* outWidth, int* 
     // from everything that was here before it.
     std::vector<HWND> existing;
     for (const auto& window : EnumerateCapturableWindows()) existing.push_back(window.hwnd);
+
+    // A locked session barely composites, so capture collapses to ~3 fps and the
+    // game would be unplayable even though everything "worked". Unlock before
+    // launching rather than after, so the game never opens onto a dead desktop.
+    if (SessionLock::IsLocked()) {
+        server_.SendLaunchProgress("Unlocking the PC...");
+        std::string unlockError;
+        if (!SessionLock::RequestUnlock(kUnlockTimeoutSeconds, &unlockError)) {
+            *error = unlockError;
+            return false;
+        }
+    }
+    // Nothing can stop a deliberate lock, but this rules out the screensaver and
+    // display-sleep paths for as long as the stream lasts.
+    SessionLock::PreventLocking();
 
     FILETIME launchTime{};
     GetSystemTimeAsFileTime(&launchTime);
