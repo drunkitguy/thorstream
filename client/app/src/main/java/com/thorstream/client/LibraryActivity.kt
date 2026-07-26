@@ -19,7 +19,8 @@ class LibraryActivity : AppCompatActivity() {
     private lateinit var adapter: GameGridAdapter
     private var control: ControlConnection? = null
 
-    private lateinit var host: String
+    private lateinit var addresses: List<String>
+    private var host: String = ""
     private var bitrate = 30000
     private var fps = 60
 
@@ -28,7 +29,7 @@ class LibraryActivity : AppCompatActivity() {
         binding = ActivityLibraryBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        host = intent.getStringExtra(EXTRA_HOST).orEmpty()
+        addresses = intent.getStringArrayListExtra(EXTRA_ADDRESSES)?.toList() ?: emptyList()
         bitrate = intent.getIntExtra(EXTRA_BITRATE, 30000)
         fps = intent.getIntExtra(EXTRA_FPS, 60)
 
@@ -51,7 +52,7 @@ class LibraryActivity : AppCompatActivity() {
     }
 
     private fun connect() {
-        setStatus("Connecting to $host…")
+        setStatus(getString(R.string.connecting))
 
         val connection = ControlConnection(lifecycleScope)
         control = connection
@@ -72,6 +73,19 @@ class LibraryActivity : AppCompatActivity() {
         connection.onDisconnected = { runOnUiThread { setStatus("Disconnected.") } }
 
         lifecycleScope.launch {
+            // Addresses are already in preference order, local first, so at home
+            // this succeeds on the first try and never touches the external one.
+            val reachable = HostDiscovery.firstReachable(addresses, Protocol.DEFAULT_CONTROL_PORT)
+            if (reachable == null) {
+                setStatus(getString(R.string.unreachable))
+                return@launch
+            }
+
+            host = reachable
+            if (addresses.size > 1 && reachable != addresses.first()) {
+                setStatus(getString(R.string.connected_external, reachable))
+            }
+
             try {
                 connection.connect(host, Protocol.DEFAULT_CONTROL_PORT)
             } catch (e: Exception) {
@@ -114,7 +128,7 @@ class LibraryActivity : AppCompatActivity() {
     }
 
     companion object {
-        const val EXTRA_HOST = "host"
+        const val EXTRA_ADDRESSES = "addresses"
         const val EXTRA_BITRATE = "bitrate"
         const val EXTRA_FPS = "fps"
     }

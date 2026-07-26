@@ -2,14 +2,22 @@
 <resources>
     <string name="app_name">thorstream</string>
     <string name="subtitle">Stream one game window from your PC.</string>
-    <string name="hint_host">PC IP address</string>
+    <string name="hint_host">PC address on this network</string>
+    <string name="hint_external">External address (optional)</string>
     <string name="hint_bitrate">kbps</string>
     <string name="hint_fps">fps</string>
-    <string name="connect">Connect</string>
-    <string name="show_windows">Show open windows</string>
-    <string name="show_games">Show games</string>
+    <string name="connect">Connect manually</string>
+    <string name="rescan">Search again</string>
+    <string name="searching">Looking for PCs on this network…</string>
+    <string name="none_found">No PCs found. Enter an address below.</string>
+    <string name="found_one">Found 1 PC — tap to connect.</string>
+    <string name="found_many">Found %1$d PCs — tap one to connect.</string>
+    <string name="manual_header">Or connect manually</string>
+    <string name="connecting">Connecting…</string>
+    <string name="unreachable">Could not reach that PC on any address.</string>
+    <string name="connected_external">Connected via %1$s</string>
     <string name="library_title">Your games</string>
     <string name="cover_description">Game cover</string>
     <string name="pick_pc">Choose your PC</string>
-    <string name="status_idle">Enter your PC\'s IP address and connect.</string>
+    <string name="status_idle">Enter your PC\'s address and connect.</string>
 </resources>

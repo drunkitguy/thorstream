@@ -29,6 +29,7 @@
 
 #include "sudovda.h"
 #include "virtual_display.h"
+#include "discovery.h"
 #include "display_topology.h"
 #include "session.h"
 #include "window_capture.h"
@@ -465,6 +466,17 @@ int RunServer(const Options& opts) {
     if (!session.Serve(static_cast<uint16_t>(opts.port), &error)) {
         wprintf(L"Failed to start the server: %hs\n", error.c_str());
         return 3;
+    }
+
+    // Answer discovery probes so the handheld can find this PC by itself. Not
+    // fatal if it fails: typing an address still works.
+    static DiscoveryResponder discoveryResponder;
+    std::string discoveryError;
+    if (discoveryResponder.Start(discovery::kDefaultPort, static_cast<uint16_t>(opts.port),
+                                 &discoveryError)) {
+        wprintf(L"Discoverable on the local network (udp %d).\n", discovery::kDefaultPort);
+    } else {
+        wprintf(L"Discovery unavailable: %hs\n", discoveryError.c_str());
     }
 
     wprintf(L"Listening for a client on port %d.\n", opts.port);

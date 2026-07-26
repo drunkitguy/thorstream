@@ -1,29 +1,52 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- First screen: choose which PC to stream from. Deliberately sparse - the
-     library is the screen you actually spend time on. -->
+<!-- First screen: choose a PC. Discovered hosts appear by themselves; the manual
+     fields are for a PC that cannot be found by broadcast, such as one reached
+     over the internet. -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
     android:background="#0E1116"
-    android:gravity="center_vertical"
-    android:padding="32dp">
+    android:padding="24dp">
 
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:text="@string/app_name"
         android:textColor="#FFFFFF"
-        android:textSize="28sp"
+        android:textSize="26sp"
         android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/statusText"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="12dp"
+        android:text="@string/searching"
+        android:textColor="#8A93A0"
+        android:textSize="13sp" />
+
+    <ListView
+        android:id="@+id/hostList"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
+    <Button
+        android:id="@+id/rescanButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="@string/rescan" />
 
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginBottom="24dp"
-        android:text="@string/pick_pc"
-        android:textColor="#8A93A0"
-        android:textSize="14sp" />
+        android:layout_marginTop="16dp"
+        android:text="@string/manual_header"
+        android:textColor="#C7CED8"
+        android:textSize="13sp"
+        android:textStyle="bold" />
 
     <EditText
         android:id="@+id/hostInput"
@@ -32,14 +55,22 @@
         android:autofillHints="192.168.1.10"
         android:hint="@string/hint_host"
         android:inputType="text"
-        android:imeOptions="actionDone"
+        android:textColor="#FFFFFF"
+        android:textColorHint="#5A6474" />
+
+    <EditText
+        android:id="@+id/externalInput"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:autofillHints="home.example.com"
+        android:hint="@string/hint_external"
+        android:inputType="text"
         android:textColor="#FFFFFF"
         android:textColorHint="#5A6474" />
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
         android:orientation="horizontal">
 
         <EditText
@@ -69,16 +100,7 @@
         android:id="@+id/connectButton"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="20dp"
+        android:layout_marginTop="8dp"
         android:text="@string/connect" />
-
-    <TextView
-        android:id="@+id/statusText"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="16dp"
-        android:text="@string/status_idle"
-        android:textColor="#8A93A0"
-        android:textSize="13sp" />
 
 </LinearLayout>
