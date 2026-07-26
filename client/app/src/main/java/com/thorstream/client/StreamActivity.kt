@@ -9,6 +9,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.DisplayMetrics
 import android.util.Log
+import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.SurfaceHolder
@@ -121,7 +122,12 @@ class StreamActivity : AppCompatActivity() {
             latencyMillis = (nowMicros() - sentMicros) / 1000
         }
 
-        setStatus("Connecting...")
+        // Logged unconditionally: if the built-in controls are not enumerated as
+        // a game controller at all, no amount of key mapping will help, and that
+        // is worth knowing before blaming the network.
+        val pads = describeControllers()
+        Log.i(TAG, "input devices: $pads")
+        setStatus(if (pads == NO_CONTROLLER) "$NO_CONTROLLER — connecting..." else "Connecting...")
         lifecycleScope.launch {
             try {
                 connection.connect(host, Protocol.DEFAULT_CONTROL_PORT)
@@ -158,6 +164,20 @@ class StreamActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 runOnUiThread { setStatus("Could not connect: ${e.message}") }
             }
+        }
+    }
+
+    /** What Android thinks is attached, for when no button does anything at all. */
+    private fun describeControllers(): String {
+        // toList() first: getDeviceIds() returns a primitive IntArray, which has
+        // no mapNotNull - that only exists on Array<T> and Iterable.
+        val ids: List<Int> = InputDevice.getDeviceIds().toList()
+        val pads: List<InputDevice> = ids
+            .mapNotNull { id -> InputDevice.getDevice(id) }
+            .filter { device -> device.isGameController() }
+        if (pads.isEmpty()) return NO_CONTROLLER
+        return pads.joinToString(", ") { device ->
+            "${device.name} (sources 0x${Integer.toHexString(device.sources)})"
         }
     }
 
@@ -287,9 +307,6 @@ class StreamActivity : AppCompatActivity() {
     // ---- input ---------------------------------------------------------------
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        // Let the back button out so the user can leave the stream.
-        if (event.keyCode == KeyEvent.KEYCODE_BACK) return super.dispatchKeyEvent(event)
-
         // Select+Start opens the on-screen keyboard. Track both buttons and
         // swallow them while the combination is held, so the game never sees a
         // stray Start press from someone reaching for the keyboard.
@@ -317,7 +334,22 @@ class StreamActivity : AppCompatActivity() {
             return super.dispatchKeyEvent(event)
         }
 
+        // The gamepad gets first refusal on everything, including BACK. That
+        // ordering is the fix for B ending the stream: a B press that reaches
+        // super unconsumed is turned into BACK by Android's key fallback, and
+        // BACK finishes the activity. Consuming it here means it never happens.
         if (gamepad.onKey(event)) return true
+
+        // A BACK the tracker declined did not come from the controller, so it is
+        // the system gesture and should still leave the stream.
+        if (event.keyCode == KeyEvent.KEYCODE_BACK) return super.dispatchKeyEvent(event)
+
+        // Anything else unrecognised is a mapping gap. Say so on screen rather
+        // than dropping it, because a button that does nothing is otherwise
+        // indistinguishable from a broken connection.
+        gamepad.lastUnmapped?.let {
+            if (event.action == KeyEvent.ACTION_DOWN) setStatus("unmapped: $it")
+        }
         return super.dispatchKeyEvent(event)
     }
 
@@ -360,6 +392,7 @@ class StreamActivity : AppCompatActivity() {
     companion object {
         private const val TAG = "StreamActivity"
         private const val IDR_THROTTLE_MS = 100L
+        private const val NO_CONTROLLER = "no game controller detected"
 
         const val EXTRA_HOST = "host"
         const val EXTRA_WINDOW_ID = "windowId"

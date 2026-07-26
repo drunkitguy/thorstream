@@ -48,9 +48,25 @@ class GamepadTracker(private val onChanged: (GamepadState) -> Unit) {
     private val lastSent = GamepadState()
     private var sequence = 0
 
+    /**
+     * The last key this tracker did not recognise, for the on-screen readout.
+     * Handhelds vary enormously in what key codes their built-in controls emit,
+     * and a button that silently does nothing is impossible to diagnose from the
+     * other end of a network.
+     */
+    var lastUnmapped: String? = null
+        private set
+
     /** @return true if the event was a gamepad button we consumed. */
     fun onKey(event: KeyEvent): Boolean {
-        val bit = buttonBitFor(event.keyCode) ?: return false
+        val bit = buttonBitFor(event.keyCode, event.isFromController())
+        if (bit == null) {
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                lastUnmapped = "${KeyEvent.keyCodeToString(event.keyCode)} " +
+                    "(code ${event.keyCode}, source 0x${Integer.toHexString(event.source)})"
+            }
+            return false
+        }
         val pressed = event.action == KeyEvent.ACTION_DOWN
 
         // Some pads report triggers as buttons rather than axes.
@@ -126,9 +142,15 @@ class GamepadTracker(private val onChanged: (GamepadState) -> Unit) {
         return (value.coerceIn(0f, 1f) * 255f).roundToInt()
     }
 
-    private fun buttonBitFor(keyCode: Int): Int? = when (keyCode) {
+    private fun buttonBitFor(keyCode: Int, fromController: Boolean): Int? = when (keyCode) {
         KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_DPAD_CENTER -> GamepadButton.A
         KeyEvent.KEYCODE_BUTTON_B -> GamepadButton.B
+        // Two different routes end up here. Some handhelds' key layouts report
+        // the B button as BACK outright; and Android's key-fallback turns an
+        // unconsumed BUTTON_B into BACK by itself. Either way, a BACK that came
+        // from a controller is the B button and must never leave the stream.
+        // A BACK from anywhere else is the system gesture and is left alone.
+        KeyEvent.KEYCODE_BACK -> if (fromController) GamepadButton.B else null
         KeyEvent.KEYCODE_BUTTON_X -> GamepadButton.X
         KeyEvent.KEYCODE_BUTTON_Y -> GamepadButton.Y
         KeyEvent.KEYCODE_BUTTON_L1 -> GamepadButton.LEFT_SHOULDER
@@ -150,6 +172,16 @@ class GamepadTracker(private val onChanged: (GamepadState) -> Unit) {
         const val DEADZONE = 0.12f
     }
 }
+
+/**
+ * Whether this key came from a controller. Checked against the originating
+ * device as well as the event source: some handhelds deliver their built-in
+ * buttons with a KEYBOARD source even though the device itself is a gamepad.
+ */
+fun KeyEvent.isFromController(): Boolean =
+    isFromSource(InputDevice.SOURCE_GAMEPAD) ||
+        isFromSource(InputDevice.SOURCE_JOYSTICK) ||
+        device?.isGameController() == true
 
 /** True if this device looks like a game controller rather than a keyboard. */
 fun InputDevice.isGameController(): Boolean {
