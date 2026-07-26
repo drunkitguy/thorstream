@@ -26,6 +26,7 @@ add_executable(thorstream-host
   src/cover_art.cpp
   src/discovery.cpp
   src/input_injector.cpp
+  src/popup_overlay.cpp
   third_party/vigem/src/ViGEmClient.cpp
 )
 

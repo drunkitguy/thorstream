@@ -193,6 +193,14 @@ bool Session::StartSession(const StartRequest& request, int* outWidth, int* outH
     bytesSent_ = 0;
     lastFrameTicks_ = NowMicros();
 
+    // Watch for dialogs appearing over the game. Started after the capture so a
+    // popup can never be tracked before there is a frame to draw it onto.
+    if (forwardPopups) {
+        capturedWindow_ = hwnd;
+        popups_ = std::make_unique<PopupOverlay>(device_, hwnd);
+        popups_->Start();
+    }
+
     capture_->Start([this](const CapturedFrame& frame) { OnCapturedFrame(frame); },
                     [this] { server_.SendError("the captured window was closed"); });
 
@@ -245,6 +253,73 @@ bool Session::LaunchAndStream(const LaunchRequest& request, int* outWidth, int* 
     return StartSession(start, outWidth, outHeight, outSequenceHeader, error);
 }
 
+void Session::RememberGameFrame(const CapturedFrame& frame) {
+    if (!popups_) return;  // only needed to recomposite popups
+
+    D3D11_TEXTURE2D_DESC desc{};
+    frame.texture->GetDesc(&desc);
+
+    if (lastGameFrame_) {
+        D3D11_TEXTURE2D_DESC existing{};
+        lastGameFrame_->GetDesc(&existing);
+        if (existing.Width != desc.Width || existing.Height != desc.Height) lastGameFrame_ = nullptr;
+    }
+
+    if (!lastGameFrame_) {
+        D3D11_TEXTURE2D_DESC owned = desc;
+        owned.Usage = D3D11_USAGE_DEFAULT;
+        owned.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        owned.CPUAccessFlags = 0;
+        owned.MiscFlags = 0;
+        if (FAILED(device_.device->CreateTexture2D(&owned, nullptr, lastGameFrame_.put()))) return;
+    }
+
+    device_.context->CopyResource(lastGameFrame_.get(), frame.texture);
+    lastGameCrop_ = frame.crop;
+    hasGameFrame_ = true;
+}
+
+std::vector<NvencEncoder::Overlay> Session::CollectOverlays() {
+    std::vector<NvencEncoder::Overlay> overlays;
+    if (!popups_ || !capturedWindow_) return overlays;
+
+    RECT gameBounds{};
+    POINT clientOrigin{0, 0};
+    if (!ClientToScreen(capturedWindow_, &clientOrigin)) return overlays;
+    if (!GetClientRect(capturedWindow_, &gameBounds)) return overlays;
+
+    const auto candidates = popups_->Current();
+
+    for (const auto& popup : candidates) {
+        NvencEncoder::Overlay overlay;
+        overlay.texture = popup.texture;
+        overlay.source = popup.source;
+        overlay.destination.left = popup.onScreen.left - clientOrigin.x;
+        overlay.destination.top = popup.onScreen.top - clientOrigin.y;
+        overlay.destination.right = popup.onScreen.right - clientOrigin.x;
+        overlay.destination.bottom = popup.onScreen.bottom - clientOrigin.y;
+
+        // A popup entirely outside the streamed window would otherwise be
+        // stretched across the frame by the viewport clamp.
+        if (overlay.destination.right <= 0 || overlay.destination.bottom <= 0) continue;
+        if (overlay.destination.left >= gameBounds.right ||
+            overlay.destination.top >= gameBounds.bottom) {
+            continue;
+        }
+        overlays.push_back(overlay);
+    }
+
+    if (!overlays.empty() && !loggedOverlay_) {
+        loggedOverlay_ = true;
+        wprintf(L"popup: compositing at %d,%d %dx%d over %dx%d\n", overlays[0].destination.left,
+                overlays[0].destination.top,
+                overlays[0].destination.right - overlays[0].destination.left,
+                overlays[0].destination.bottom - overlays[0].destination.top, gameBounds.right,
+                gameBounds.bottom);
+    }
+    return overlays;
+}
+
 void Session::RestoreDisplays() {
     if (displaysDetached_) {
         wprintf(L"Restoring physical displays...\n");
@@ -274,11 +349,16 @@ void Session::StopSession() {
 
     std::unique_ptr<WindowCapture> capture;
     std::unique_ptr<NvencEncoder> encoder;
+    std::unique_ptr<PopupOverlay> popups;
     {
         std::lock_guard lock(mutex_);
         capture = std::move(capture_);
         encoder = std::move(encoder_);
+        popups = std::move(popups_);
     }
+    // Stopped before the encoder: its frame callbacks reference textures the
+    // encoder is about to stop reading.
+    popups.reset();
     // Destroyed outside the lock: WindowCapture::Stop waits for in-flight frame
     // callbacks, which themselves take the lock.
     capture.reset();
@@ -289,13 +369,23 @@ void Session::OnCapturedFrame(const CapturedFrame& frame) {
     std::lock_guard lock(mutex_);
     if (!encoder_) return;
 
+    // Anything demanding attention over the game gets drawn on top, positioned
+    // relative to the game window so it lands where it actually is on screen.
+    // Keep our own copy of the game's frame. A modal dialog usually stops the
+    // game rendering, so without this the popup would only ever be drawn onto a
+    // frame that arrived before it existed - which is to say, never.
+    RememberGameFrame(frame);
+
+    const std::vector<NvencEncoder::Overlay> overlays = CollectOverlays();
+
     encoder_->EncodeFrame(frame.texture, frame.crop, NowMicros(),
                           [this](const EncodedPacket& packet) {
                               server_.SendVideoFrame(packet.data, packet.size, packet.timestamp,
                                                      packet.isKeyframe);
                               framesSent_.fetch_add(1);
                               bytesSent_.fetch_add(packet.size);
-                          });
+                          },
+                          overlays);
     lastFrameTicks_ = NowMicros();
 }
 
@@ -310,10 +400,21 @@ void Session::KeepaliveLoop() {
 
         std::lock_guard lock(mutex_);
         if (!encoder_) continue;
-        encoder_->RepeatLastFrame(now, [this](const EncodedPacket& packet) {
+
+        const auto onPacket = [this](const EncodedPacket& packet) {
             server_.SendVideoFrame(packet.data, packet.size, packet.timestamp, packet.isKeyframe);
             bytesSent_.fetch_add(packet.size);
-        });
+        };
+
+        // A dialog usually stops the game rendering, so the idle path is exactly
+        // when a popup most needs drawing. Re-composite from the retained frame
+        // rather than resending one captured before the popup appeared.
+        const auto overlays = CollectOverlays();
+        if (!overlays.empty() && hasGameFrame_ && lastGameFrame_) {
+            encoder_->EncodeFrame(lastGameFrame_.get(), lastGameCrop_, now, onPacket, overlays);
+        } else {
+            encoder_->RepeatLastFrame(now, onPacket);
+        }
         lastFrameTicks_ = now;
     }
 }

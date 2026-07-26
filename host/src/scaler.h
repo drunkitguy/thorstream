@@ -26,6 +26,12 @@ public:
     // Samples `sourceRect` of `source` and fills `destination` entirely.
     bool Draw(ID3D11Texture2D* source, const RECT& sourceRect, ID3D11Texture2D* destination);
 
+    // Draws into a sub-rectangle of the destination instead of the whole thing,
+    // leaving everything outside it untouched. Used to composite popups over an
+    // already-drawn game frame.
+    bool DrawInto(ID3D11Texture2D* source, const RECT& sourceRect, ID3D11Texture2D* destination,
+                  const RECT& destinationRect);
+
 private:
     struct Impl;
     TextureScaler();

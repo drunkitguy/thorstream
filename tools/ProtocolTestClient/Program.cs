@@ -67,9 +67,20 @@ internal static class Program
         hello.Str("protocol-test-client");
         await SendAsync(stream, MessageType.Hello, hello);
 
-        // WINDOW_LIST
-        var (type, payload) = await ReadMessageAsync(stream);
-        if (type != MessageType.WindowList) { Console.WriteLine($"expected WINDOW_LIST, got {type}"); return 1; }
+        // The host sends the game list first now, so skip past anything that is
+        // not the window list rather than treating it as an error.
+        MessageType type;
+        byte[] payload;
+        while (true)
+        {
+            (type, payload) = await ReadMessageAsync(stream);
+            if (type == MessageType.WindowList) break;
+            if (type == MessageType.Error)
+            {
+                Console.WriteLine($"host error: {new Reader(payload).Str()}");
+                return 1;
+            }
+        }
 
         var windows = ParseWindowList(payload);
         Console.WriteLine($"\nhost offered {windows.Count} windows:");

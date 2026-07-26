@@ -8,6 +8,7 @@
 
 #include "d3d_device.h"
 #include "display_topology.h"
+#include "popup_overlay.h"
 #include "encoder_nvenc.h"
 #include "net_server.h"
 #include "virtual_display.h"
@@ -37,6 +38,11 @@ public:
     // Give the game its own display at the client's resolution and detach the
     // physical ones for the duration of the session.
     bool useVirtualDisplay = true;
+
+    // Draw dialogs that appear over the game into the stream. Loosens the
+    // isolation slightly - a notification could now be visible - so it is a
+    // choice rather than an assumption.
+    bool forwardPopups = true;
 
 private:
     bool StartSession(const StartRequest& request, int* outWidth, int* outHeight,
@@ -68,6 +74,7 @@ private:
     std::unique_ptr<WindowCapture> capture_;
     std::unique_ptr<NvencEncoder> encoder_;
 
+    std::unique_ptr<PopupOverlay> popups_;
     std::unique_ptr<VirtualDisplay> virtualDisplay_;
     std::vector<SavedDisplay> savedDisplays_;
     bool displaysDetached_ = false;
@@ -77,6 +84,16 @@ private:
     HWND capturedWindow_ = nullptr;
     WINDOWPLACEMENT savedPlacement_{};
     bool savedPlacementValid_ = false;
+    bool loggedOverlay_ = false;
+
+    // A copy of the last game frame, so popups can be composited even while the
+    // game itself has stopped producing frames.
+    winrt::com_ptr<ID3D11Texture2D> lastGameFrame_;
+    RECT lastGameCrop_{};
+    bool hasGameFrame_ = false;
+
+    void RememberGameFrame(const CapturedFrame& frame);
+    std::vector<NvencEncoder::Overlay> CollectOverlays();
 
     std::thread keepaliveThread_;
     std::atomic<bool> running_{false};

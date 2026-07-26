@@ -50,6 +50,7 @@ struct Options {
     int port = protocol::kDefaultControlPort;
     bool hidden = false;
     bool fullRange = false;
+    bool forwardPopups = true;
     std::wstring logPath;
 };
 
@@ -433,6 +434,8 @@ int RunServer(const Options& opts) {
     auto device = CreateGraphicsDevice();
     Session session(device);
     session.fullRange = opts.fullRange;
+    session.forwardPopups = opts.forwardPopups;
+    if (!opts.forwardPopups) wprintf(L"Popup forwarding disabled.\n");
     if (opts.fullRange) wprintf(L"Encoding full-range colour.\n");
 
     // Optional: without ViGEmBus we can still stream video, just not send input.
@@ -708,6 +711,7 @@ int wmain(int argc, wchar_t** argv) {
         else if (arg == L"--encode") opts.encode = true;
         else if (arg == L"--hevc") { opts.hevc = true; opts.encode = true; }
         else if (arg == L"--full-range") opts.fullRange = true;
+        else if (arg == L"--no-popups") opts.forwardPopups = false;
         else if (arg.rfind(L"--", 0) == 0) {
             wprintf(L"Unknown option %s\n", arg.c_str());
             return kExitBadOption;

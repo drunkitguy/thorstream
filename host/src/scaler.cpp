@@ -124,6 +124,15 @@ std::unique_ptr<TextureScaler> TextureScaler::Create(ID3D11Device* device,
 
 bool TextureScaler::Draw(ID3D11Texture2D* source, const RECT& sourceRect,
                          ID3D11Texture2D* destination) {
+    D3D11_TEXTURE2D_DESC desc{};
+    if (!destination) return false;
+    destination->GetDesc(&desc);
+    const RECT whole{0, 0, static_cast<LONG>(desc.Width), static_cast<LONG>(desc.Height)};
+    return DrawInto(source, sourceRect, destination, whole);
+}
+
+bool TextureScaler::DrawInto(ID3D11Texture2D* source, const RECT& sourceRect,
+                             ID3D11Texture2D* destination, const RECT& destinationRect) {
     auto& impl = *impl_;
     if (!source || !destination) return false;
 
@@ -175,9 +184,21 @@ bool TextureScaler::Draw(ID3D11Texture2D* source, const RECT& sourceRect,
     memcpy(mapped.pData, &params, sizeof(params));
     impl.context->Unmap(impl.constants.get(), 0);
 
+    // The viewport is what confines the fullscreen triangle to a sub-region, so
+    // compositing a popup leaves the rest of the frame exactly as it was.
+    const LONG left = std::clamp(destinationRect.left, 0L, static_cast<LONG>(destinationDesc.Width));
+    const LONG top = std::clamp(destinationRect.top, 0L, static_cast<LONG>(destinationDesc.Height));
+    const LONG right =
+        std::clamp(destinationRect.right, left, static_cast<LONG>(destinationDesc.Width));
+    const LONG bottom =
+        std::clamp(destinationRect.bottom, top, static_cast<LONG>(destinationDesc.Height));
+    if (right <= left || bottom <= top) return false;
+
     D3D11_VIEWPORT viewport{};
-    viewport.Width = static_cast<float>(destinationDesc.Width);
-    viewport.Height = static_cast<float>(destinationDesc.Height);
+    viewport.TopLeftX = static_cast<float>(left);
+    viewport.TopLeftY = static_cast<float>(top);
+    viewport.Width = static_cast<float>(right - left);
+    viewport.Height = static_cast<float>(bottom - top);
     viewport.MaxDepth = 1.0f;
 
     ID3D11RenderTargetView* renderTargets[] = {impl.destinationView.get()};

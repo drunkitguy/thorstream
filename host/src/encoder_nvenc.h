@@ -51,10 +51,20 @@ public:
                                                 const EncoderSettings& settings,
                                                 std::string* error);
 
+    // An extra image drawn over the frame, e.g. a dialog that appeared over the
+    // game. Positions are in the source's coordinate space and are scaled along
+    // with everything else.
+    struct Overlay {
+        ID3D11Texture2D* texture = nullptr;
+        RECT source{};
+        RECT destination{};  // relative to `crop`
+    };
+
     // Copies `crop` out of `texture` and encodes it. The callback fires
     // synchronously with the resulting bitstream, still owned by the encoder.
     bool EncodeFrame(ID3D11Texture2D* texture, const RECT& crop, uint64_t timestamp,
-                     const PacketCallback& onPacket);
+                     const PacketCallback& onPacket,
+                     const std::vector<Overlay>& overlays = {});
 
     // Ask for an IDR on the next frame - used when a client joins or reports loss.
     void RequestKeyframe() { forceIdr_ = true; }

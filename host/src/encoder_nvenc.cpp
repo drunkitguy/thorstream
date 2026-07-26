@@ -263,7 +263,8 @@ std::unique_ptr<NvencEncoder> NvencEncoder::Create(ID3D11Device* device,
 }
 
 bool NvencEncoder::EncodeFrame(ID3D11Texture2D* texture, const RECT& crop, uint64_t timestamp,
-                               const PacketCallback& onPacket) {
+                               const PacketCallback& onPacket,
+                               const std::vector<Overlay>& overlays) {
     auto& impl = *impl_;
     if (!impl.encoder) return false;
 
@@ -287,6 +288,25 @@ bool NvencEncoder::EncodeFrame(ID3D11Texture2D* texture, const RECT& crop, uint6
         // Falling back to a crop here would silently show a corner of the window
         // rather than the whole thing, so refuse the frame instead.
         return false;
+    }
+
+    // Composite anything that should appear over the game, scaled by the same
+    // factor as the frame beneath it so a dialog lands where it actually sits.
+    if (!overlays.empty() && impl.scaler) {
+        const double scaleX = static_cast<double>(settings_.width) / (std::max)(cropW, 1u);
+        const double scaleY = static_cast<double>(settings_.height) / (std::max)(cropH, 1u);
+
+        for (const auto& overlay : overlays) {
+            if (!overlay.texture) continue;
+
+            RECT target;
+            target.left = static_cast<LONG>(overlay.destination.left * scaleX);
+            target.top = static_cast<LONG>(overlay.destination.top * scaleY);
+            target.right = static_cast<LONG>(overlay.destination.right * scaleX);
+            target.bottom = static_cast<LONG>(overlay.destination.bottom * scaleY);
+
+            impl.scaler->DrawInto(overlay.texture, overlay.source, impl.inputTexture.get(), target);
+        }
     }
 
     hasFrame_ = true;

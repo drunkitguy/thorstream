@@ -144,6 +144,32 @@ Services run in session 0, which is isolated from your desktop.
 service would start perfectly happily and capture nothing at all. A logon task
 runs in your session, which is where the windows are.
 
+## Popups
+
+Dialogs that appear over the game are separate windows, so capturing only the
+game means they never reach the stream — you get a game that has silently
+stopped responding because something is asking a question you cannot see.
+
+Qualifying popups are captured as their own windows and composited over the game
+frame. That keeps the premise intact: we still only ever capture windows we have
+explicitly chosen, rather than falling back to capturing the desktop.
+
+**This does loosen the isolation, and it is worth being clear about.** A
+notification containing something private can now reach the stream, where
+previously nothing outside the game window could. Turn it off with
+`--no-popups` if that matters more than seeing dialogs.
+
+What counts as a popup is deliberately narrow, because the first version was
+not: it accepted any window with popup-ish style bits and promptly composited
+the Settings app over the entire frame, hiding the game completely. A popup must
+now be **smaller than 85% of the game window** — a dialog interrupts something,
+it does not replace it — must not be a shell surface or app frame, and must be a
+dialog, owned, topmost or popup-styled.
+
+Popups are re-composited even while the game is idle. A modal dialog usually
+stops the game rendering, which is exactly when the popup most needs drawing, so
+the host keeps a copy of the last game frame to draw onto.
+
 ## Colour
 
 The bitstream declares its colour space explicitly: **BT.709, studio range**,
