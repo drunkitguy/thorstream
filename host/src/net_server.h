@@ -8,10 +8,21 @@
 #include <thread>
 #include <vector>
 
+#include "game_library.h"
 #include "protocol.h"
 #include "window_list.h"
 
 namespace thorstream {
+
+struct LaunchRequest {
+    std::string gameId;
+    int width = 0;
+    int height = 0;
+    int fps = 60;
+    int bitrateKbps = 20000;
+    protocol::Codec codec = protocol::Codec::H264;
+    uint16_t clientUdpPort = protocol::kDefaultVideoPort;
+};
 
 struct StartRequest {
     uint64_t windowId = 0;
@@ -29,6 +40,13 @@ class StreamServer {
 public:
     struct Callbacks {
         std::function<std::vector<WindowEntry>()> listWindows;
+        std::function<std::vector<GameEntry>()> listGames;
+        // Launches the game, waits for its window, and starts streaming it.
+        // Reports progress via SendLaunchProgress so the client is not left
+        // staring at nothing while a game loads.
+        std::function<bool(const LaunchRequest&, int* outWidth, int* outHeight,
+                           std::vector<uint8_t>* outSequenceHeader, std::string* error)>
+            launchGame;
         // Return false and fill `error` to reject; on success fill the actual
         // encoded size and the codec sequence header.
         std::function<bool(const StartRequest&, int* outWidth, int* outHeight,
@@ -50,6 +68,9 @@ public:
 
     void SendError(const std::string& message);
 
+    // Progress text shown on the client while a game starts up.
+    void SendLaunchProgress(const std::string& message);
+
     bool HasClient() const { return clientConnected_; }
     bool IsStreaming() const { return streaming_; }
 
@@ -60,7 +81,9 @@ private:
 
     void SendMessage(protocol::MessageType type, const protocol::Writer& payload);
     void SendWindowList();
+    void SendGameList();
     void HandleStart(protocol::Reader& reader);
+    void HandleLaunch(protocol::Reader& reader);
 
     void CloseClient();
 

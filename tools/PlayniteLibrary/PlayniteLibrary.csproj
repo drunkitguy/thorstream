@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>PlayniteLibrary</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Must match the LiteDB version Playnite itself ships (4.1.4). The v5
+         package cannot read a v4 database file at all. -->
+    <PackageReference Include="LiteDB" Version="4.1.4" />
+  </ItemGroup>
+
+</Project>

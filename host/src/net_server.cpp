@@ -206,11 +206,19 @@ void StreamServer::HandleMessage(protocol::MessageType type, const uint8_t* data
             reader.U16(version);
             reader.Str(name);
             wprintf(L"hello from \"%hs\" (protocol v%u)\n", name.c_str(), version);
+            // The game library is what the client actually shows. The window
+            // list still follows it, both as a fallback and for streaming
+            // something that is already running.
+            SendGameList();
             SendWindowList();
             break;
         }
         case protocol::MessageType::Start:
             HandleStart(reader);
+            break;
+
+        case protocol::MessageType::Launch:
+            HandleLaunch(reader);
             break;
 
         case protocol::MessageType::Stop:
@@ -272,6 +280,79 @@ void StreamServer::SendWindowList() {
         out.Str(Utf8(window.title));
     }
     SendMessage(protocol::MessageType::WindowList, out);
+}
+
+void StreamServer::SendGameList() {
+    if (!callbacks_.listGames) return;
+    const auto games = callbacks_.listGames();
+
+    protocol::Writer out;
+    out.U16(static_cast<uint16_t>(games.size()));
+    for (const auto& game : games) {
+        out.Str(game.id);
+        out.Str(game.name);
+        out.Str(game.platform);
+        out.Str(game.source);
+        out.U8(game.installed ? 1 : 0);
+    }
+    SendMessage(protocol::MessageType::GameList, out);
+    wprintf(L"sent %zu games from the Playnite library\n", games.size());
+}
+
+void StreamServer::SendLaunchProgress(const std::string& message) {
+    protocol::Writer out;
+    out.Str(message);
+    SendMessage(protocol::MessageType::LaunchProgress, out);
+}
+
+void StreamServer::HandleLaunch(protocol::Reader& reader) {
+    LaunchRequest request;
+    uint32_t width = 0, height = 0, fps = 0, bitrate = 0;
+    uint8_t codec = 0;
+    uint16_t udpPort = 0;
+
+    if (!reader.Str(request.gameId) || !reader.U32(width) || !reader.U32(height) ||
+        !reader.U32(fps) || !reader.U32(bitrate) || !reader.U8(codec) || !reader.U16(udpPort)) {
+        SendError("malformed LAUNCH");
+        return;
+    }
+
+    request.width = static_cast<int>(width);
+    request.height = static_cast<int>(height);
+    request.fps = fps > 0 ? static_cast<int>(fps) : 60;
+    request.bitrateKbps = bitrate > 0 ? static_cast<int>(bitrate) : 20000;
+    request.codec = static_cast<protocol::Codec>(codec);
+    request.clientUdpPort = udpPort != 0 ? udpPort : protocol::kDefaultVideoPort;
+
+    {
+        std::lock_guard lock(videoMutex_);
+        auto* destination = reinterpret_cast<sockaddr_in*>(videoDestination_.data());
+        destination->sin_port = htons(request.clientUdpPort);
+    }
+
+    int actualWidth = 0, actualHeight = 0;
+    std::vector<uint8_t> sequenceHeader;
+    std::string error;
+
+    if (!callbacks_.launchGame ||
+        !callbacks_.launchGame(request, &actualWidth, &actualHeight, &sequenceHeader, &error)) {
+        SendError(error.empty() ? "could not launch that game" : error);
+        return;
+    }
+
+    frameNumber_ = 0;
+    streaming_ = true;
+
+    protocol::Writer out;
+    out.U32(static_cast<uint32_t>(actualWidth));
+    out.U32(static_cast<uint32_t>(actualHeight));
+    out.U8(static_cast<uint8_t>(request.codec));
+    out.U16(static_cast<uint16_t>(sequenceHeader.size()));
+    out.Raw(sequenceHeader.data(), sequenceHeader.size());
+    SendMessage(protocol::MessageType::Started, out);
+
+    if (callbacks_.onRequestIdr) callbacks_.onRequestIdr();
+    wprintf(L"streaming %dx%d to udp port %u\n", actualWidth, actualHeight, request.clientUdpPort);
 }
 
 void StreamServer::HandleStart(protocol::Reader& reader) {

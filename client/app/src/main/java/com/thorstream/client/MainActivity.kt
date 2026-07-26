@@ -14,6 +14,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private var control: ControlConnection? = null
     private var windows: List<WindowInfo> = emptyList()
+    private var games: List<GameInfo> = emptyList()
+
+    // The game list is what this screen is for. Open windows remain reachable as
+    // a fallback, for streaming something already running or when Playnite is
+    // not installed.
+    private var showingGames = true
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -28,8 +34,40 @@ class MainActivity : AppCompatActivity() {
         binding.connectButton.setOnClickListener { connect() }
 
         binding.windowList.setOnItemClickListener { _, _, position, _ ->
-            windows.getOrNull(position)?.let { startStream(it) }
+            if (showingGames) {
+                games.getOrNull(position)?.let { launchGame(it) }
+            } else {
+                windows.getOrNull(position)?.let { startStream(it) }
+            }
         }
+
+        binding.toggleButton.setOnClickListener {
+            showingGames = !showingGames
+            refreshList()
+        }
+    }
+
+    private fun refreshList() {
+        binding.toggleButton.text =
+            if (showingGames) getString(R.string.show_windows) else getString(R.string.show_games)
+
+        val entries = if (showingGames) {
+            games.map { "${it.name}\n${it.subtitle}" }
+        } else {
+            windows.map { "${it.process}  —  ${it.title}  (${it.width}x${it.height})" }
+        }
+
+        binding.windowList.adapter =
+            ArrayAdapter(this, android.R.layout.simple_list_item_1, entries)
+
+        setStatus(
+            when {
+                entries.isNotEmpty() && showingGames -> "Pick a game to launch and stream."
+                entries.isNotEmpty() -> "Pick a window to stream."
+                showingGames -> "No games found. Is Playnite installed on the PC?"
+                else -> "No capturable windows on that PC."
+            }
+        )
     }
 
     private fun connect() {
@@ -51,18 +89,18 @@ class MainActivity : AppCompatActivity() {
         val connection = ControlConnection(lifecycleScope)
         control = connection
 
+        connection.onGameList = { list ->
+            runOnUiThread {
+                games = list
+                refreshList()
+            }
+        }
         connection.onWindowList = { list ->
             runOnUiThread {
                 windows = list
-                binding.windowList.adapter = ArrayAdapter(
-                    this,
-                    android.R.layout.simple_list_item_1,
-                    list.map { "${it.process}  —  ${it.title}  (${it.width}x${it.height})" },
-                )
-                setStatus(
-                    if (list.isEmpty()) "No capturable windows on that PC."
-                    else "Pick a window to stream."
-                )
+                // Only redraw if the windows list is the one on screen; the game
+                // list arrives first and should not be replaced by it.
+                if (!showingGames) refreshList()
             }
         }
         connection.onError = { message -> runOnUiThread { setStatus("Host error: $message") } }
@@ -77,6 +115,21 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    private fun launchGame(game: GameInfo) {
+        control?.close()
+        control = null
+
+        startActivity(
+            Intent(this, StreamActivity::class.java).apply {
+                putExtra(StreamActivity.EXTRA_HOST, binding.hostInput.text.toString().trim())
+                putExtra(StreamActivity.EXTRA_GAME_ID, game.id)
+                putExtra(StreamActivity.EXTRA_TITLE, game.name)
+                putExtra(StreamActivity.EXTRA_BITRATE, bitrateKbps())
+                putExtra(StreamActivity.EXTRA_FPS, fps())
+            }
+        )
     }
 
     private fun startStream(window: WindowInfo) {

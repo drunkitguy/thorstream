@@ -6,5 +6,7 @@
     <string name="hint_bitrate">kbps</string>
     <string name="hint_fps">fps</string>
     <string name="connect">Connect</string>
+    <string name="show_windows">Show open windows</string>
+    <string name="show_games">Show games</string>
     <string name="status_idle">Enter your PC\'s IP address and connect.</string>
 </resources>

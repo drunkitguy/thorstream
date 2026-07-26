@@ -28,6 +28,12 @@ enum class MessageType : uint8_t {
     Ping = 0x08,
     Pong = 0x09,
     Error = 0x0A,
+
+    // The client picks a game from the user's Playnite library rather than from
+    // whatever windows happen to be open.
+    GameList = 0x0B,       // host -> client
+    Launch = 0x0C,         // client -> host
+    LaunchProgress = 0x0D, // host -> client: games take a while to start
 };
 
 enum class Codec : uint8_t { H264 = 0, Hevc = 1 };

@@ -104,6 +104,7 @@ class StreamActivity : AppCompatActivity() {
                 }
             }
         }
+        connection.onLaunchProgress = { message -> runOnUiThread { setStatus(message) } }
         connection.onError = { message -> runOnUiThread { setStatus("Host: $message") } }
         connection.onDisconnected = { runOnUiThread { setStatus("Disconnected from host.") } }
         connection.onPong = { sentMicros ->
@@ -114,20 +115,36 @@ class StreamActivity : AppCompatActivity() {
         lifecycleScope.launch {
             try {
                 connection.connect(host, Protocol.DEFAULT_CONTROL_PORT)
+                val gameId = intent.getStringExtra(EXTRA_GAME_ID)
                 // Our panel is the ceiling: streaming a 4K window to a 1080p
                 // screen costs 4x the bandwidth and decode time for nothing the
                 // eye can resolve. The host fits the window inside this box and
                 // keeps its aspect ratio.
                 val (maxWidth, maxHeight) = displaySize()
-                connection.requestStart(
-                    windowId = windowId,
-                    width = maxWidth,
-                    height = maxHeight,
-                    fps = fps,
-                    bitrateKbps = bitrate,
-                    codec = Protocol.CODEC_H264,
-                    udpPort = udpPort,
-                )
+                if (gameId != null) {
+                    // The host launches it, waits for its window, and only then
+                    // replies with STARTED - which can take minutes for a large
+                    // game, hence the progress messages.
+                    connection.requestLaunch(
+                        gameId = gameId,
+                        width = maxWidth,
+                        height = maxHeight,
+                        fps = fps,
+                        bitrateKbps = bitrate,
+                        codec = Protocol.CODEC_H264,
+                        udpPort = udpPort,
+                    )
+                } else {
+                    connection.requestStart(
+                        windowId = windowId,
+                        width = maxWidth,
+                        height = maxHeight,
+                        fps = fps,
+                        bitrateKbps = bitrate,
+                        codec = Protocol.CODEC_H264,
+                        udpPort = udpPort,
+                    )
+                }
             } catch (e: Exception) {
                 runOnUiThread { setStatus("Could not connect: ${e.message}") }
             }
@@ -250,6 +267,7 @@ class StreamActivity : AppCompatActivity() {
 
         const val EXTRA_HOST = "host"
         const val EXTRA_WINDOW_ID = "windowId"
+        const val EXTRA_GAME_ID = "gameId"
         const val EXTRA_TITLE = "title"
         const val EXTRA_BITRATE = "bitrate"
         const val EXTRA_FPS = "fps"

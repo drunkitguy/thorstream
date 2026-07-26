@@ -22,6 +22,7 @@ add_executable(thorstream-host
   src/sudovda.cpp
   src/virtual_display.cpp
   src/display_topology.cpp
+  src/game_library.cpp
   third_party/vigem/src/ViGEmClient.cpp
 )
 

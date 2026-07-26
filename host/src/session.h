@@ -41,6 +41,14 @@ public:
 private:
     bool StartSession(const StartRequest& request, int* outWidth, int* outHeight,
                       std::vector<uint8_t>* outSequenceHeader, std::string* error);
+
+    // Launches a Playnite game, waits for its window, then streams it.
+    bool LaunchAndStream(const LaunchRequest& request, int* outWidth, int* outHeight,
+                         std::vector<uint8_t>* outSequenceHeader, std::string* error);
+
+    // Games can take a very long time to show a window: shader compilation,
+    // launcher updates, anti-cheat startup.
+    static constexpr int kLaunchTimeoutSeconds = 180;
     void StopSession();
     void OnCapturedFrame(const CapturedFrame& frame);
 

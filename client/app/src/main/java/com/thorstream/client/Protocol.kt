@@ -23,12 +23,15 @@ object Protocol {
     const val REQUEST_IDR: Byte = 0x06
     const val GAMEPAD: Byte = 0x07
     const val PING: Byte = 0x08
+    const val LAUNCH: Byte = 0x0C
 
     // Host -> client
     const val WINDOW_LIST: Byte = 0x02
     const val STARTED: Byte = 0x04
     const val PONG: Byte = 0x09
     const val ERROR: Byte = 0x0A
+    const val GAME_LIST: Byte = 0x0B
+    const val LAUNCH_PROGRESS: Byte = 0x0D
 
     const val CODEC_H264: Byte = 0
     const val CODEC_HEVC: Byte = 1
@@ -50,6 +53,19 @@ object GamepadButton {
     const val B = 1 shl 13
     const val X = 1 shl 14
     const val Y = 1 shl 15
+}
+
+/** An entry from the user's Playnite library. */
+data class GameInfo(
+    val id: String,
+    val name: String,
+    val platform: String,
+    val source: String,
+    val installed: Boolean,
+) {
+    /** e.g. "PC (Windows) · Steam", skipping whichever part is missing. */
+    val subtitle: String
+        get() = listOf(platform, source).filter { it.isNotBlank() }.joinToString(" · ")
 }
 
 data class WindowInfo(

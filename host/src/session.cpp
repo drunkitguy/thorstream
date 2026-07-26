@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <thread>
 
 #include "scaler.h"
 #include "window_list.h"
@@ -31,9 +32,21 @@ Session::~Session() {
 bool Session::Serve(uint16_t controlPort, std::string* error) {
     StreamServer::Callbacks callbacks;
     callbacks.listWindows = [] { return EnumerateCapturableWindows(); };
+    callbacks.listGames = [] {
+        std::string error;
+        auto games = GameLibrary::Read(&error);
+        if (games.empty() && !error.empty()) {
+            wprintf(L"Playnite library unavailable: %hs\n", error.c_str());
+        }
+        return games;
+    };
     callbacks.startSession = [this](const StartRequest& request, int* w, int* h,
                                     std::vector<uint8_t>* header, std::string* err) {
         return StartSession(request, w, h, header, err);
+    };
+    callbacks.launchGame = [this](const LaunchRequest& request, int* w, int* h,
+                                  std::vector<uint8_t>* header, std::string* err) {
+        return LaunchAndStream(request, w, h, header, err);
     };
     callbacks.stopSession = [this] { StopSession(); };
     callbacks.onRequestIdr = [this] {
@@ -192,6 +205,44 @@ bool Session::StartSession(const StartRequest& request, int* outWidth, int* outH
     *outHeight = height;
     *outSequenceHeader = encoder_->SequenceHeader();
     return true;
+}
+
+bool Session::LaunchAndStream(const LaunchRequest& request, int* outWidth, int* outHeight,
+                              std::vector<uint8_t>* outSequenceHeader, std::string* error) {
+    // Note what is already on screen, so the game's window can be told apart
+    // from everything that was here before it.
+    std::vector<HWND> existing;
+    for (const auto& window : EnumerateCapturableWindows()) existing.push_back(window.hwnd);
+
+    FILETIME launchTime{};
+    GetSystemTimeAsFileTime(&launchTime);
+
+    server_.SendLaunchProgress("Launching...");
+    if (!GameLibrary::Launch(request.gameId, error)) return false;
+
+    server_.SendLaunchProgress("Waiting for the game to start...");
+    const HWND window = GameLibrary::WaitForNewGameWindow(launchTime, kLaunchTimeoutSeconds, existing);
+    if (!window) {
+        *error = "the game did not open a window within " + std::to_string(kLaunchTimeoutSeconds) +
+                 " seconds";
+        return false;
+    }
+
+    // Launchers often show a window before the game itself does; give the real
+    // one a moment to settle so we do not capture a splash screen forever.
+    server_.SendLaunchProgress("Starting the stream...");
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+
+    StartRequest start;
+    start.windowId = reinterpret_cast<uint64_t>(window);
+    start.width = request.width;
+    start.height = request.height;
+    start.fps = request.fps;
+    start.bitrateKbps = request.bitrateKbps;
+    start.codec = request.codec;
+    start.clientUdpPort = request.clientUdpPort;
+
+    return StartSession(start, outWidth, outHeight, outSequenceHeader, error);
 }
 
 void Session::RestoreDisplays() {

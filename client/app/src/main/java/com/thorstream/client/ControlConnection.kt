@@ -20,6 +20,8 @@ import java.nio.ByteOrder
 class ControlConnection(private val scope: CoroutineScope) {
 
     var onWindowList: ((List<WindowInfo>) -> Unit)? = null
+    var onGameList: ((List<GameInfo>) -> Unit)? = null
+    var onLaunchProgress: ((String) -> Unit)? = null
     var onStarted: ((SessionInfo) -> Unit)? = null
     var onError: ((String) -> Unit)? = null
     var onDisconnected: (() -> Unit)? = null
@@ -59,6 +61,29 @@ class ControlConnection(private val scope: CoroutineScope) {
             Protocol.START,
             ProtocolWriter()
                 .u64(windowId)
+                .u32(width)
+                .u32(height)
+                .u32(fps)
+                .u32(bitrateKbps)
+                .u8(codec.toInt())
+                .u16(udpPort),
+        )
+    }
+
+    /** Asks the host to launch a Playnite game and stream it once it appears. */
+    fun requestLaunch(
+        gameId: String,
+        width: Int,
+        height: Int,
+        fps: Int,
+        bitrateKbps: Int,
+        codec: Byte,
+        udpPort: Int,
+    ) {
+        send(
+            Protocol.LAUNCH,
+            ProtocolWriter()
+                .str(gameId)
                 .u32(width)
                 .u32(height)
                 .u32(fps)
@@ -168,6 +193,25 @@ class ControlConnection(private val scope: CoroutineScope) {
                 val headerLength = reader.u16()
                 onStarted?.invoke(SessionInfo(width, height, codec, reader.bytes(headerLength)))
             }
+
+            Protocol.GAME_LIST -> {
+                val count = reader.u16()
+                val games = ArrayList<GameInfo>(count)
+                repeat(count) {
+                    games.add(
+                        GameInfo(
+                            id = reader.str(),
+                            name = reader.str(),
+                            platform = reader.str(),
+                            source = reader.str(),
+                            installed = reader.u8() != 0,
+                        )
+                    )
+                }
+                onGameList?.invoke(games)
+            }
+
+            Protocol.LAUNCH_PROGRESS -> onLaunchProgress?.invoke(reader.str())
 
             Protocol.PONG -> onPong?.invoke(reader.u64())
             Protocol.ERROR -> onError?.invoke(reader.str())
