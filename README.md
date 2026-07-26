@@ -85,14 +85,24 @@ The APK lands in `client/app/build/outputs/apk/debug/`.
 
 ## Running
 
-On the PC:
+Grab the [latest release](https://github.com/drunkitguy/thorstream/releases/latest)
+if you would rather not build anything.
+
+**On the PC**, start the server:
 
 ```bash
 host\build\thorstream-host.exe --serve
 ```
 
-It prints the addresses to connect to. Then on the Thor: open the app, type that
-IP, pick a window from the list.
+It prints the addresses to connect to.
+
+**On the Thor**, download the APK from the release page in the device's browser
+and open it. Android will ask you to allow installing from your browser — that
+is expected for a sideloaded app, and only needs granting once. The APK is
+debug-signed, which is what lets it install without a Play Store account.
+
+Then open the app, type the IP the host printed, tap Connect, and pick a window
+from the list.
 
 The host also has a standalone capture mode, useful for checking a specific game
 before involving the network at all:
@@ -103,6 +113,50 @@ host\build\thorstream-host.exe --encode --seconds 10
 
 With no window filter it prints a numbered list and prompts. It reports the
 achieved framerate and writes an `.h264` file you can play in VLC.
+
+## Checking it works
+
+The host prints its state on startup. A working server looks like this:
+
+```
+=== thorstream host ===
+Virtual Xbox 360 pad ready.
+Listening for a client on port 47810.
+  Point the Thor client at one of these:
+    192.168.0.3:47810
+```
+
+If you want to confirm independently that it is listening:
+
+```bash
+netstat -ano | findstr 47810
+```
+
+You should see `0.0.0.0:47810  LISTENING`. If that line is missing, the server
+did not start — check the console for an error.
+
+### Firewall
+
+Windows will prompt the first time the host listens. Allow it on **both**
+private and public networks: home Wi-Fi is often classified as Public, and a
+private-only rule will leave the handheld silently unable to connect.
+
+The rule is tied to the executable's path, so Windows will prompt again if you
+move the `.exe` or swap a locally built binary for a downloaded release.
+
+To check what is already allowed:
+
+```powershell
+Get-NetFirewallRule -DisplayName "*thorstream*" | Select-Object DisplayName, Profile, Enabled
+```
+
+### The client cannot see the host
+
+- Confirm both devices are on the same network — a "guest" Wi-Fi network is
+  usually isolated from the wired LAN by design.
+- Confirm the IP. The host prints every address it can find; use the one on the
+  same subnet as the handheld.
+- Some routers block client-to-client traffic ("AP isolation"); this must be off.
 
 ## Testing
 

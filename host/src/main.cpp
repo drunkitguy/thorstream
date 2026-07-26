@@ -250,6 +250,10 @@ int RunCapture(const WindowEntry& target, const Options& opts) {
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
+    // Unbuffered: a server you cannot tell is running is a server you assume is
+    // broken. Matters when the output is piped to a log or a wrapper script.
+    setvbuf(stdout, nullptr, _IONBF, 0);
+
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
 
