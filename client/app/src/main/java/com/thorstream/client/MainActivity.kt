@@ -37,7 +37,67 @@ class MainActivity : AppCompatActivity() {
         binding.rescanButton.setOnClickListener { scan() }
         binding.connectButton.setOnClickListener { connectManually() }
 
+        // Launched by a front end such as Cocoon rather than by hand: skip the
+        // picker entirely and go straight to the game it named.
+        val requested = requestedGameName()
+        if (requested != null) {
+            launchExternally(requested)
+            return
+        }
+
         scan()
+    }
+
+    /**
+     * The game an external launcher asked for, or null for a normal start.
+     *
+     * A name can be given directly, but the usual route is a file path: Cocoon
+     * names its tag file after the game, so the base name is the title. Parsing
+     * it here rather than relying on a front end's own substitution tokens keeps
+     * this working whatever those turn out to be called.
+     */
+    private fun requestedGameName(): String? {
+        intent.getStringExtra(EXTRA_GAME)?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
+
+        val path = intent.getStringExtra(EXTRA_PATH)?.trim() ?: intent.data?.path
+        if (path.isNullOrEmpty()) return null
+        return path.substringAfterLast('/')
+            .substringAfterLast('\\')
+            .substringBeforeLast('.')
+            .trim()
+            .takeIf { it.isNotEmpty() }
+    }
+
+    private fun launchExternally(gameName: String) {
+        binding.statusText.text = getString(R.string.searching)
+        lifecycleScope.launch {
+            val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+            val known = listOf(
+                intent.getStringExtra(EXTRA_HOST)?.trim().orEmpty(),
+                prefs.getString(KEY_HOST, "").orEmpty(),
+                prefs.getString(KEY_EXTERNAL, "").orEmpty(),
+            ).filter { it.isNotEmpty() }
+
+            // Falling back to a broadcast scan means a launcher entry keeps
+            // working after the PC's address changes, which it will.
+            val addresses = known.ifEmpty { HostDiscovery.scan().map { it.address } }
+            if (addresses.isEmpty()) {
+                binding.statusText.text = getString(R.string.none_found)
+                return@launch
+            }
+
+            startActivity(
+                Intent(this@MainActivity, LibraryActivity::class.java).apply {
+                    putStringArrayListExtra(LibraryActivity.EXTRA_ADDRESSES, ArrayList(addresses))
+                    putExtra(LibraryActivity.EXTRA_BITRATE, bitrateKbps())
+                    putExtra(LibraryActivity.EXTRA_FPS, fps())
+                    putExtra(LibraryActivity.EXTRA_AUTOLAUNCH, gameName)
+                }
+            )
+            // Finish, so backing out of the stream returns to the front end
+            // rather than to a host picker the user never asked for.
+            finish()
+        }
     }
 
     private fun scan() {
@@ -98,5 +158,12 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_EXTERNAL = "external"
         private const val KEY_BITRATE = "bitrate"
         private const val KEY_FPS = "fps"
+
+        // The external launch contract, used by the Cocoon platform definition
+        // in cocoon/. Documented in cocoon/README.md - changing these names
+        // breaks anyone's existing launcher entries.
+        const val EXTRA_GAME = "game"
+        const val EXTRA_PATH = "path"
+        const val EXTRA_HOST = "host"
     }
 }

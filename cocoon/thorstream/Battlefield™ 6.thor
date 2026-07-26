@@ -1,0 +1,1 @@
+﻿[game] Battlefield™ 6

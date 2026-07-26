@@ -1,0 +1,1 @@
+﻿[game] Mafia: Definitive Edition

@@ -24,6 +24,9 @@ class LibraryActivity : AppCompatActivity() {
     private var bitrate = 30000
     private var fps = 60
 
+    // Set when a front end named a game to start; consumed once.
+    private var autoLaunch: String? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityLibraryBinding.inflate(layoutInflater)
@@ -32,6 +35,7 @@ class LibraryActivity : AppCompatActivity() {
         addresses = intent.getStringArrayListExtra(EXTRA_ADDRESSES)?.toList() ?: emptyList()
         bitrate = intent.getIntExtra(EXTRA_BITRATE, 30000)
         fps = intent.getIntExtra(EXTRA_FPS, 60)
+        autoLaunch = intent.getStringExtra(EXTRA_AUTOLAUNCH)
 
         adapter = GameGridAdapter(
             onRequestCover = { gameId -> control?.requestCover(gameId) },
@@ -64,6 +68,16 @@ class LibraryActivity : AppCompatActivity() {
                     if (games.isEmpty()) "No games found — is Playnite installed on the PC?"
                     else "${games.size} games"
                 )
+
+                // Cleared before use, so returning from the stream lands on the
+                // library rather than immediately relaunching the same game.
+                val wanted = autoLaunch
+                autoLaunch = null
+                if (wanted != null) {
+                    val match = findGame(games, wanted)
+                    if (match != null) launchGame(match)
+                    else setStatus("\"$wanted\" is not in the Playnite library")
+                }
             }
         }
         connection.onCover = { gameId, jpeg ->
@@ -92,6 +106,19 @@ class LibraryActivity : AppCompatActivity() {
                 runOnUiThread { setStatus("Could not connect: ${e.message}") }
             }
         }
+    }
+
+    /**
+     * Matches a game by name, tolerating the fact that the name arrived as a
+     * filename. Windows cannot put a colon or a question mark in one, so an
+     * exact match is tried first and then a comparison that ignores everything
+     * except letters and digits.
+     */
+    private fun findGame(games: List<GameInfo>, wanted: String): GameInfo? {
+        games.firstOrNull { it.name.equals(wanted, ignoreCase = true) }?.let { return it }
+        val loose = wanted.filter { it.isLetterOrDigit() }.lowercase()
+        if (loose.isEmpty()) return null
+        return games.firstOrNull { it.name.filter { c -> c.isLetterOrDigit() }.lowercase() == loose }
     }
 
     private fun launchGame(game: GameInfo) {
@@ -131,5 +158,6 @@ class LibraryActivity : AppCompatActivity() {
         const val EXTRA_ADDRESSES = "addresses"
         const val EXTRA_BITRATE = "bitrate"
         const val EXTRA_FPS = "fps"
+        const val EXTRA_AUTOLAUNCH = "autolaunch"
     }
 }

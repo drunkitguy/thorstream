@@ -1,0 +1,25 @@
+{
+  "databaseVersion": 13,
+  "revisionNumber": 1,
+  "platform": {
+    "name": "Windows PC (thorstream)",
+    "uniqueId": "thorstream",
+    "shortname": "thorstream",
+    "description": "Games streamed from a Windows PC over the local network.",
+    "acceptedFilenameRegex": "^(.*)\\.(?:thor)$",
+    "scraperSourceList": [],
+    "boxArtType": "Box art front",
+    "useCustomBoxArtType": false,
+    "customBoxArtType": "",
+    "extra": ""
+  },
+  "playerList": [
+    {
+      "name": "thorstream",
+      "uniqueId": "thorstream.client",
+      "description": "Stream this game from the PC",
+      "acceptedFilenameRegex": "^(.*)\\.(?:thor)$",
+      "amStartArguments": "-n\ncom.thorstream.client/.MainActivity\n--es\npath\n{file.path}"
+    }
+  ]
+}
