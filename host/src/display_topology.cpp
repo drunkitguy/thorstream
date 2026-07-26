@@ -99,36 +99,78 @@ bool DisplayTopology::KeepOnly(const std::wstring& keepDeviceName, std::string* 
         return false;
     }
 
-    // Make the keeper primary at the origin first. Detaching the current primary
-    // while it is still primary tends to leave Windows rearranging things on its
-    // own, which then cannot be restored faithfully.
-    DEVMODEW keepMode{};
-    keepMode.dmSize = sizeof(keepMode);
-    if (EnumDisplaySettingsExW(keepDeviceName.c_str(), ENUM_CURRENT_SETTINGS, &keepMode, 0)) {
-        keepMode.dmPosition.x = 0;
-        keepMode.dmPosition.y = 0;
-        keepMode.dmFields |= DM_POSITION;
-        ChangeDisplaySettingsExW(keepDeviceName.c_str(), &keepMode, nullptr,
-                                 CDS_SET_PRIMARY | CDS_UPDATEREGISTRY | CDS_NORESET, nullptr);
-    }
-
-    for (const auto& display : displays) {
-        if (display.deviceName == keepDeviceName) continue;
-
-        // A DEVMODE with zeroed geometry is how Windows is told to detach a
-        // display; there is no explicit "detach" call.
-        DEVMODEW detach{};
-        detach.dmSize = sizeof(detach);
-        detach.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_POSITION | DM_BITSPERPEL |
-                          DM_DISPLAYFREQUENCY | DM_DISPLAYFLAGS;
-        ChangeDisplaySettingsExW(display.deviceName.c_str(), &detach, nullptr,
-                                 CDS_UPDATEREGISTRY | CDS_NORESET, nullptr);
-    }
-
-    const LONG applied = ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr);
-    if (applied != DISP_CHANGE_SUCCESSFUL) {
-        if (error) *error = "the display change was rejected (code " + std::to_string(applied) + ")";
+    // ChangeDisplaySettingsEx cannot express "only this display": it refuses to
+    // detach whichever display is primary, and reports success while doing
+    // nothing. The CCD API describes the whole topology in one call instead,
+    // which is what the Settings app uses, so use that.
+    UINT32 pathCount = 0, modeCount = 0;
+    if (GetDisplayConfigBufferSizes(QDC_ALL_PATHS, &pathCount, &modeCount) != ERROR_SUCCESS) {
+        if (error) *error = "could not read the display configuration";
         return false;
+    }
+
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
+    std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
+    if (QueryDisplayConfig(QDC_ALL_PATHS, &pathCount, paths.data(), &modeCount, modes.data(),
+                           nullptr) != ERROR_SUCCESS) {
+        if (error) *error = "could not enumerate display paths";
+        return false;
+    }
+    paths.resize(pathCount);
+    modes.resize(modeCount);
+
+    // Submit only the path we want active. Handing back the whole QDC_ALL_PATHS
+    // set - which contains many unusable inactive paths - is rejected outright
+    // with ERROR_INVALID_PARAMETER.
+    std::vector<DISPLAYCONFIG_PATH_INFO> keeperOnly;
+    bool keeperFound = false;
+    for (auto& path : paths) {
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME source{};
+        source.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+        source.header.size = sizeof(source);
+        source.header.adapterId = path.sourceInfo.adapterId;
+        source.header.id = path.sourceInfo.id;
+
+        const bool isKeeper = DisplayConfigGetDeviceInfo(&source.header) == ERROR_SUCCESS &&
+                              keepDeviceName == source.viewGdiDeviceName;
+
+        if (!isKeeper) continue;
+
+        path.flags |= DISPLAYCONFIG_PATH_ACTIVE;
+        // Mode indices refer to the array we are no longer supplying, so clear
+        // them and let Windows compute a mode for the one remaining path.
+        path.sourceInfo.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
+        path.targetInfo.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
+        keeperOnly.push_back(path);
+        keeperFound = true;
+        break;
+    }
+
+    if (!keeperFound) {
+        if (error) *error = "the display to keep has no display path; refusing to detach the rest";
+        return false;
+    }
+
+    // SDC_ALLOW_CHANGES lets Windows pick consistent modes and positions for the
+    // single remaining path, which then necessarily becomes primary at the origin.
+    const LONG applied =
+        SetDisplayConfig(static_cast<UINT32>(keeperOnly.size()), keeperOnly.data(), 0, nullptr,
+                         SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES |
+                             SDC_SAVE_TO_DATABASE);
+    if (applied != ERROR_SUCCESS) {
+        if (error) *error = "SetDisplayConfig rejected the change (code " + std::to_string(applied) + ")";
+        return false;
+    }
+
+    // Verify rather than trust the return code; this API is more honest than
+    // ChangeDisplaySettingsEx, but the whole point here is not to be wrong.
+    for (const auto& display : Snapshot()) {
+        if (display.deviceName != keepDeviceName) {
+            if (error) *error = "Windows kept " + std::string(display.deviceName.begin(),
+                                                             display.deviceName.end()) +
+                                " attached despite reporting success";
+            return false;
+        }
     }
     return true;
 }
