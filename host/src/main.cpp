@@ -6,6 +6,10 @@
 #include <shellscalingapi.h>
 #include <winrt/base.h>
 
+#include <fcntl.h>
+#include <io.h>
+#include <share.h>
+
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -36,7 +40,88 @@ struct Options {
     int fpsCap = 0;
     bool serve = false;
     int port = protocol::kDefaultControlPort;
+    bool hidden = false;
+    std::wstring logPath;
 };
+
+// Distinct exit codes, because an autostarted host has nowhere to print.
+constexpr int kExitLogOpenFailed = 21;
+constexpr int kExitCaptureUnsupported = 22;
+constexpr int kExitBadOption = 23;
+
+// Only one host may own the capture ports and the virtual pad. Autostart makes a
+// double-launch likely (task fires, then the user starts one by hand), and
+// "port already in use" is a poor way to find that out.
+HANDLE AcquireSingleInstanceLock() {
+    HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\thorstream-host-singleton");
+    if (mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
+        CloseHandle(mutex);
+        return nullptr;
+    }
+    return mutex;
+}
+
+// Redirects output to a file so an autostarted, windowless host is still
+// diagnosable. Appends, because the interesting run is rarely the last one.
+// Last-resort diagnostics for a host that failed before it had anywhere to log.
+// Deliberately raw Win32: the CRT streams are exactly what is suspect here.
+void WriteStartupError(const std::wstring& message) {
+    wchar_t exePath[MAX_PATH] = {};
+    if (!GetModuleFileNameW(nullptr, exePath, MAX_PATH)) return;
+    std::wstring path = exePath;
+    const size_t slash = path.find_last_of(L'\\');
+    if (slash == std::wstring::npos) return;
+    path = path.substr(0, slash + 1) + L"thorstream-startup-error.txt";
+
+    const HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                                    CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+
+    const std::string utf8 = [&] {
+        const int size = WideCharToMultiByte(CP_UTF8, 0, message.data(),
+                                             static_cast<int>(message.size()), nullptr, 0, nullptr,
+                                             nullptr);
+        std::string out(static_cast<size_t>(size), '\0');
+        WideCharToMultiByte(CP_UTF8, 0, message.data(), static_cast<int>(message.size()),
+                            out.data(), size, nullptr, nullptr);
+        return out;
+    }();
+
+    DWORD written = 0;
+    WriteFile(file, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
+    CloseHandle(file);
+}
+
+bool RedirectOutputToLog(const std::wstring& path) {
+    // Create the parent directory first. An autostarted host runs long before
+    // anyone thinks to make its log folder, and "path not found" is otherwise
+    // indistinguishable from a permissions problem.
+    std::error_code ec;
+    const auto parent = std::filesystem::path(path).parent_path();
+    if (!parent.empty()) std::filesystem::create_directories(parent, ec);
+
+    // _wfsopen rather than freopen: the default sharing mode locks the file for
+    // the entire run, so nobody can tail the log of a host that is still up -
+    // exactly when you most want to read it.
+    FILE* file = _wfsopen(path.c_str(), L"a", _SH_DENYNO);
+    if (!file) {
+        WriteStartupError(L"could not open the log file [" + path + L"]\nerrno " +
+                          std::to_wstring(errno) + L"\n");
+        return false;
+    }
+
+    // Point the standard descriptors at the log, leaving the CRT's own stdout
+    // stream object intact. Grafting FILE structs around instead turned out to
+    // be fragile enough to silently produce empty logs.
+    const int logFd = _fileno(file);
+    if (logFd < 0 || _dup2(logFd, _fileno(stdout)) != 0) {
+        WriteStartupError(L"could not redirect stdout to [" + path + L"]\n");
+        fclose(file);
+        return false;
+    }
+    _dup2(logFd, _fileno(stderr));
+    return true;
+}
 
 // So the user knows what address to type into the handheld.
 void PrintLocalAddresses(int port) {
@@ -196,6 +281,9 @@ void PrintUsage() {
         L"  --fps N         cap capture rate at N fps (default: uncapped)\n"
         L"  --serve         run as a streaming server for the Thor client\n"
         L"  --port N        control port when serving (default 47810)\n"
+        L"  --hidden        detach the console window (for autostart)\n"
+        L"  --log FILE      append output to FILE instead of the console\n"
+        L"  --gamepad-selftest  drive the virtual pad directly, no networking\n"
         L"With no filter, prints a numbered window list and prompts for a choice.\n");
 }
 
@@ -337,9 +425,12 @@ int RunCapture(const WindowEntry& target, const Options& opts) {
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
-    // Unbuffered: a server you cannot tell is running is a server you assume is
-    // broken. Matters when the output is piped to a log or a wrapper script.
-    setvbuf(stdout, nullptr, _IONBF, 0);
+    // A scheduled task can launch us with no console attached at all. The CRT's
+    // default invalid-parameter handler responds to writes on a broken stdout by
+    // fast-failing with 0xC0000409 - a crash, before any logging exists to
+    // explain it. Swallow those instead.
+    _set_invalid_parameter_handler(
+        [](const wchar_t*, const wchar_t*, const wchar_t*, unsigned int, uintptr_t) {});
 
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
@@ -354,24 +445,60 @@ int wmain(int argc, wchar_t** argv) {
         else if (arg == L"--fps") opts.fpsCap = next();
         else if (arg == L"--port") opts.port = next();
         else if (arg == L"--serve") opts.serve = true;
+        else if (arg == L"--hidden") opts.hidden = true;
+        else if (arg == L"--log") { if (i + 1 < argc) opts.logPath = argv[++i]; }
         else if (arg == L"--gamepad-selftest") return RunGamepadSelfTest();
         else if (arg == L"--encode") opts.encode = true;
         else if (arg == L"--hevc") { opts.hevc = true; opts.encode = true; }
-        else if (arg.rfind(L"--", 0) == 0) { wprintf(L"Unknown option %s\n", arg.c_str()); return 2; }
+        else if (arg.rfind(L"--", 0) == 0) {
+            wprintf(L"Unknown option %s\n", arg.c_str());
+            return kExitBadOption;
+        }
         else if (opts.filter.empty()) opts.filter = arg;
     }
     if (opts.seconds <= 0) opts.seconds = 10;
 
+    // Hide the console window rather than FreeConsole(). Detaching leaves the CRT
+    // holding streams with no valid handles, and reattaching them to a file is
+    // fragile enough that it silently produced empty logs. Hiding the window is
+    // what "run in the background" actually needs, and stdout stays valid.
+    if (opts.hidden) {
+        if (HWND console = GetConsoleWindow()) ShowWindow(console, SW_HIDE);
+    }
+
+    // Redirect before the first byte of output, so an autostarted host records
+    // even its startup failures.
+    if (!opts.logPath.empty() && !RedirectOutputToLog(opts.logPath)) {
+        // Distinct exit code: when this runs unattended there is, by definition,
+        // nowhere to print the reason.
+        wprintf(L"Could not open the log file %s\n", opts.logPath.c_str());
+        return kExitLogOpenFailed;
+    }
+
+    // Unbuffered: a server you cannot tell is running is a server you assume is
+    // broken. Safe to do now that stdout is known-good.
+    setvbuf(stdout, nullptr, _IONBF, 0);
+
     wprintf(L"=== thorstream host ===\n");
     if (!WindowCapture::IsSupported()) {
         wprintf(L"Windows.Graphics.Capture is not supported on this machine.\n");
-        return 2;
+        return kExitCaptureUnsupported;
     }
 
     if (opts.serve) {
+        HANDLE instanceLock = AcquireSingleInstanceLock();
+        if (!instanceLock) {
+            wprintf(L"Another thorstream host is already running; leaving it alone.\n");
+            return 0;
+        }
+
         g_shutdownEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         SetConsoleCtrlHandler(ConsoleHandler, TRUE);
-        return RunServer(opts);
+
+        const int result = RunServer(opts);
+        ReleaseMutex(instanceLock);
+        CloseHandle(instanceLock);
+        return result;
     }
 
     const auto windows = EnumerateCapturableWindows();

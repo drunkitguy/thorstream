@@ -114,6 +114,36 @@ host\build\thorstream-host.exe --encode --seconds 10
 With no window filter it prints a numbered list and prompts. It reports the
 achieved framerate and writes an `.h264` file you can play in VLC.
 
+## Running it automatically
+
+To have the host start with Windows and stay up:
+
+```powershell
+host\autostart.ps1 -Install
+```
+
+That registers a Scheduled Task which starts the host at logon, restarts it if
+it stops unexpectedly, runs with no visible console window, and logs to
+`%LOCALAPPDATA%\thorstream\host.log`.
+
+```powershell
+host\autostart.ps1 -Status      # is it installed, running, and listening?
+host\autostart.ps1 -Uninstall
+```
+
+`-Status` reports the only thing that really matters — whether the port is
+accepting connections — along with the addresses to type into the client.
+
+Pass `-ShowWindow` if you would rather see the console, or `-Port` to use a
+different port. No administrator rights are needed.
+
+### Why not a Windows service?
+
+Services run in session 0, which is isolated from your desktop.
+`Windows.Graphics.Capture` can only see windows in the interactive session, so a
+service would start perfectly happily and capture nothing at all. A logon task
+runs in your session, which is where the windows are.
+
 ## Checking it works
 
 The host prints its state on startup. A working server looks like this:
