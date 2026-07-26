@@ -57,6 +57,9 @@ void Session::Shutdown() {
     }
     server_.Stop();
     StopSession();
+    // StopSession already restores, but a session that never started still needs
+    // the marker cleared, and restoring twice is harmless.
+    RestoreDisplays();
 }
 
 bool Session::StartSession(const StartRequest& request, int* outWidth, int* outHeight,
@@ -67,6 +70,60 @@ bool Session::StartSession(const StartRequest& request, int* outWidth, int* outH
     if (!IsWindow(hwnd)) {
         *error = "that window no longer exists - refresh the list";
         return false;
+    }
+
+    // Give the game a display of its own before capturing, so it renders at the
+    // handheld's resolution rather than the desktop's. Best effort: if any part
+    // of this fails we stream the window as-is rather than abandoning the
+    // session, but we never leave displays detached on a failure.
+    if (useVirtualDisplay && request.width > 0 && request.height > 0) {
+        VirtualDisplayRequest displayRequest;
+        displayRequest.width = request.width;
+        displayRequest.height = request.height;
+        displayRequest.refreshRate = request.fps > 0 ? request.fps : 60;
+
+        std::string displayError;
+        virtualDisplay_ = VirtualDisplay::Create(displayRequest, &displayError);
+        if (!virtualDisplay_) {
+            wprintf(L"Virtual display unavailable (%hs); streaming the window as-is.\n",
+                    displayError.c_str());
+        } else {
+            wprintf(L"Virtual display %s created at %dx%d\n",
+                    virtualDisplay_->DeviceName().c_str(), displayRequest.width,
+                    displayRequest.height);
+
+            savedDisplays_ = DisplayTopology::Snapshot();
+            // Written before the change, so a crash mid-switch is recoverable.
+            DisplayTopology::MarkDetached(savedDisplays_);
+
+            std::string topologyError;
+            // The monitor exists but is not part of the desktop until given a
+            // mode, and a display that is not attached cannot be the one we keep.
+            DisplayTopology::Attach(virtualDisplay_->DeviceName(), displayRequest.width,
+                                    displayRequest.height, displayRequest.refreshRate,
+                                    &topologyError);
+
+            if (DisplayTopology::KeepOnly(virtualDisplay_->DeviceName(), &topologyError)) {
+                displaysDetached_ = true;
+                wprintf(L"Physical displays detached for the session.\n");
+
+                // Everything has been herded onto the virtual display; put the
+                // captured window where the game can actually use it.
+                capturedWindow_ = hwnd;
+                savedPlacement_.length = sizeof(savedPlacement_);
+                savedPlacementValid_ = GetWindowPlacement(hwnd, &savedPlacement_) != FALSE;
+
+                ShowWindow(hwnd, SW_RESTORE);
+                SetWindowPos(hwnd, HWND_TOP, 0, 0, displayRequest.width, displayRequest.height,
+                             SWP_NOACTIVATE);
+                SetForegroundWindow(hwnd);
+            } else {
+                wprintf(L"Could not detach displays (%hs); leaving them alone.\n",
+                        topologyError.c_str());
+                DisplayTopology::ClearMarker();
+                savedDisplays_.clear();
+            }
+        }
     }
 
     CaptureOptions options;
@@ -137,10 +194,32 @@ bool Session::StartSession(const StartRequest& request, int* outWidth, int* outH
     return true;
 }
 
+void Session::RestoreDisplays() {
+    if (displaysDetached_) {
+        wprintf(L"Restoring physical displays...\n");
+        DisplayTopology::Restore(savedDisplays_);
+        displaysDetached_ = false;
+    }
+    DisplayTopology::ClearMarker();
+    savedDisplays_.clear();
+
+    // Drop the virtual display only after the real ones are back, so the desktop
+    // is never left with nothing at all.
+    virtualDisplay_.reset();
+
+    if (capturedWindow_ && savedPlacementValid_ && IsWindow(capturedWindow_)) {
+        SetWindowPlacement(capturedWindow_, &savedPlacement_);
+    }
+    capturedWindow_ = nullptr;
+    savedPlacementValid_ = false;
+}
+
 void Session::StopSession() {
     // Before tearing anything down: a client that vanished mid-press would
     // otherwise leave the virtual pad holding those inputs indefinitely.
     if (onReleaseInput) onReleaseInput();
+
+    RestoreDisplays();
 
     std::unique_ptr<WindowCapture> capture;
     std::unique_ptr<NvencEncoder> encoder;

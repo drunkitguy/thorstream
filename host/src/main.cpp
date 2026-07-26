@@ -27,6 +27,7 @@
 
 #include "sudovda.h"
 #include "virtual_display.h"
+#include "display_topology.h"
 #include "session.h"
 #include "window_capture.h"
 #include "window_list.h"
@@ -271,6 +272,63 @@ int RunVirtualDisplayTest(int width, int height, int refresh, int seconds) {
     Sleep(1000);
     wprintf(L"Done.\n");
     return 0;
+}
+
+// The full display switch, on a timer, with no client involved. Bounded so that
+// even a total failure to restore lasts only as long as the timer - and if this
+// process dies instead, the driver's watchdog drops the virtual display within
+// three seconds and Windows brings a physical one back.
+int RunDisplaySwitchTest(int width, int height, int seconds) {
+    wprintf(L"Displays before:\n");
+    for (const auto& display : DisplayTopology::Snapshot()) {
+        wprintf(L"  %s  %ux%u at (%d,%d)%hs\n", display.deviceName.c_str(),
+                display.mode.dmPelsWidth, display.mode.dmPelsHeight, display.mode.dmPosition.x,
+                display.mode.dmPosition.y, display.primary ? " [primary]" : "");
+    }
+
+    VirtualDisplayRequest request;
+    request.width = width;
+    request.height = height;
+    request.refreshRate = 60;
+
+    std::string error;
+    auto display = VirtualDisplay::Create(request, &error);
+    if (!display) {
+        wprintf(L"Could not create the virtual display: %hs\n", error.c_str());
+        return 1;
+    }
+    wprintf(L"\nVirtual display: %s\n", display->DeviceName().c_str());
+
+    const auto snapshot = DisplayTopology::Snapshot();
+    DisplayTopology::MarkDetached(snapshot);
+
+    if (!DisplayTopology::Attach(display->DeviceName(), width, height, 60, &error)) {
+        wprintf(L"Attach failed: %hs\n", error.c_str());
+        DisplayTopology::ClearMarker();
+        return 1;
+    }
+
+    wprintf(L"Detaching physical displays for %d seconds...\n", seconds);
+    if (!DisplayTopology::KeepOnly(display->DeviceName(), &error)) {
+        wprintf(L"Detach failed: %hs\n", error.c_str());
+        DisplayTopology::ClearMarker();
+        return 1;
+    }
+
+    Sleep(static_cast<DWORD>(seconds) * 1000);
+
+    const bool restored = DisplayTopology::Restore(snapshot);
+    DisplayTopology::ClearMarker();
+    display.reset();
+    Sleep(1500);
+
+    wprintf(L"\nRestore %hs. Displays after:\n", restored ? "succeeded" : "FAILED");
+    for (const auto& entry : DisplayTopology::Snapshot()) {
+        wprintf(L"  %s  %ux%u at (%d,%d)%hs\n", entry.deviceName.c_str(), entry.mode.dmPelsWidth,
+                entry.mode.dmPelsHeight, entry.mode.dmPosition.x, entry.mode.dmPosition.y,
+                entry.primary ? " [primary]" : "");
+    }
+    return restored ? 0 : 1;
 }
 
 // Drives the virtual pad directly, with no networking in the way, so a failure
@@ -578,6 +636,8 @@ int wmain(int argc, wchar_t** argv) {
 
         else if (arg == L"--vdisplay-probe") return RunVirtualDisplayProbe();
         else if (arg == L"--vdisplay-test") return RunVirtualDisplayTest(1920, 1080, 60, 10);
+
+        else if (arg == L"--display-switch-test") return RunDisplaySwitchTest(1920, 1080, 8);
         else if (arg == L"--encode") opts.encode = true;
         else if (arg == L"--hevc") { opts.hevc = true; opts.encode = true; }
         else if (arg == L"--full-range") opts.fullRange = true;
@@ -616,6 +676,12 @@ int wmain(int argc, wchar_t** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
 
     wprintf(L"=== thorstream host ===\n");
+
+    // If a previous run died with the physical displays detached, put them back
+    // before anything else. This is the recovery path for a crash or hard kill,
+    // and it must run whether or not we go on to serve.
+    DisplayTopology::RecoverIfMarked();
+
     if (!WindowCapture::IsSupported()) {
         wprintf(L"Windows.Graphics.Capture is not supported on this machine.\n");
         return kExitCaptureUnsupported;

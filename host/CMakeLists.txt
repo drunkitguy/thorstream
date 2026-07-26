@@ -21,6 +21,7 @@ add_executable(thorstream-host
   src/scaler.cpp
   src/sudovda.cpp
   src/virtual_display.cpp
+  src/display_topology.cpp
   third_party/vigem/src/ViGEmClient.cpp
 )
 

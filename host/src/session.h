@@ -7,8 +7,10 @@
 #include <thread>
 
 #include "d3d_device.h"
+#include "display_topology.h"
 #include "encoder_nvenc.h"
 #include "net_server.h"
+#include "virtual_display.h"
 #include "window_capture.h"
 
 namespace thorstream {
@@ -32,6 +34,10 @@ public:
     // relies on the client honouring the range flag we put in the bitstream.
     bool fullRange = false;
 
+    // Give the game its own display at the client's resolution and detach the
+    // physical ones for the duration of the session.
+    bool useVirtualDisplay = true;
+
 private:
     bool StartSession(const StartRequest& request, int* outWidth, int* outHeight,
                       std::vector<uint8_t>* outSequenceHeader, std::string* error);
@@ -46,9 +52,23 @@ private:
     GraphicsDevice& device_;
     StreamServer server_;
 
+    // Puts the displays and the captured window back exactly as they were.
+    // Safe to call repeatedly; does nothing if nothing was changed.
+    void RestoreDisplays();
+
     std::mutex mutex_;
     std::unique_ptr<WindowCapture> capture_;
     std::unique_ptr<NvencEncoder> encoder_;
+
+    std::unique_ptr<VirtualDisplay> virtualDisplay_;
+    std::vector<SavedDisplay> savedDisplays_;
+    bool displaysDetached_ = false;
+
+    // The captured window is moved onto the virtual display, so remember where
+    // it was in order to put it back.
+    HWND capturedWindow_ = nullptr;
+    WINDOWPLACEMENT savedPlacement_{};
+    bool savedPlacementValid_ = false;
 
     std::thread keepaliveThread_;
     std::atomic<bool> running_{false};
