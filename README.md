@@ -1,0 +1,149 @@
+# thorstream
+
+Stream **one game window** from a Windows PC to an Ayn Thor (or any Android
+device), without putting your desktop on screen.
+
+Every other PC-to-handheld streaming setup captures a whole display. This one
+captures a single window at the compositor level, so nothing else you have open
+— other apps, notifications, a second monitor — can ever appear in the stream.
+Not cropped out. Never in the frame buffer to begin with.
+
+|  |  |
+|---|---|
+| **Host** | C++20, Windows 11, `Windows.Graphics.Capture` + NVENC |
+| **Client** | Kotlin, Android 8.0+, `MediaCodec` hardware decode |
+| **Input** | Thor's controller → virtual Xbox 360 pad on the PC (ViGEm) |
+| **Transport** | TCP control + UDP video on your LAN |
+
+## Status
+
+Working and measured against a real game (007 First Light, 4K):
+
+- 3840×2160 captured and H.264-encoded at **53 fps, ~13 Mbps**
+- 9,033 UDP datagrams reassembled by a test client with **0 frames dropped**,
+  decoding with zero errors
+- Gamepad state verified end to end by reading it back through **XInput**, the
+  same API a game uses — 8/8 cases exact
+
+Not yet verified on real hardware: the Android client has been built into an APK
+but not yet run on a Thor. See [Testing](#testing).
+
+## Why window capture actually works
+
+`Windows.Graphics.Capture` can build a capture item from an `HWND`
+(`IGraphicsCaptureItemInterop::CreateForWindow`). The DWM hands over that
+window's redirection surface directly.
+
+The proof is in [FEASIBILITY.md](FEASIBILITY.md): with a **topmost magenta window
+covering the entire screen**, a normal screenshot is solid magenta while the
+captured frame is clean game content, taken at the same instant.
+
+This is the same API OBS uses for its "Window Capture (WGC)" source, so it is
+well-trodden rather than a clever hack.
+
+### Constraints worth knowing
+
+- Capture rate is bounded by the compositor, i.e. your monitor's refresh rate.
+- Frames arrive **only when the window changes**. The host re-sends the last
+  frame after 200 ms of stillness so the client's decoder never starves.
+- The capture surface includes window chrome. The host crops to the client area
+  using DWM's *extended frame bounds* — not `GetWindowRect`, which includes an
+  invisible resize border and silently costs ~10 columns of real pixels.
+- Minimised windows produce no frames.
+- Games in **legacy exclusive fullscreen** are untested. Borderless fullscreen —
+  what modern games default to — is confirmed working. If a game misbehaves,
+  switch it to borderless in its own video settings.
+
+## Building
+
+### Host (Windows)
+
+Needs Visual Studio with the **Desktop development with C++** workload (MSVC +
+Windows 11 SDK), CMake, and Ninja. An NVIDIA GPU is required for NVENC; the
+NVENC headers are vendored, and the runtime ships with your display driver.
+
+```bash
+host\build.bat
+```
+
+For gamepad input, install [ViGEmBus](https://github.com/nefarius/ViGEmBus):
+
+```bash
+winget install ViGEm.ViGEmBus
+```
+
+### Client (Android)
+
+Needs JDK 17 and the Android SDK (API 35). Point `client/local.properties` at
+your SDK, then:
+
+```bash
+cd client && gradlew.bat assembleDebug
+```
+
+The APK lands in `client/app/build/outputs/apk/debug/`.
+
+## Running
+
+On the PC:
+
+```bash
+host\build\thorstream-host.exe --serve
+```
+
+It prints the addresses to connect to. Then on the Thor: open the app, type that
+IP, pick a window from the list.
+
+The host also has a standalone capture mode, useful for checking a specific game
+before involving the network at all:
+
+```bash
+host\build\thorstream-host.exe --encode --seconds 10
+```
+
+With no window filter it prints a numbered list and prompts. It reports the
+achieved framerate and writes an `.h264` file you can play in VLC.
+
+## Testing
+
+`tools/ProtocolTestClient` is a reference client that exercises the whole
+protocol from a PC, so protocol bugs surface in C# rather than inside an Android
+app where they are far harder to see.
+
+```bash
+# stream a window and verify the received bitstream decodes
+ProtocolTestClient.exe 127.0.0.1 47810 "007" 8
+
+# drive the virtual gamepad and read it back through XInput
+ProtocolTestClient.exe --gamepad
+```
+
+## Security
+
+**There is no encryption and no authentication.** This is a LAN protocol between
+two machines you own.
+
+Do not port-forward 47810 or 47811 to the internet. Anyone who can reach the
+control port can enumerate your open windows, stream any of them, and inject
+gamepad input.
+
+## Layout
+
+```
+host/          C++ host: capture, encode, serve, inject input
+  src/         window_capture, encoder_nvenc, net_server, session, gamepad_vigem
+  third_party/ ffnvcodec (NVENC headers), vigem (ViGEmClient)
+client/        Kotlin Android client
+tools/         C# reference client for protocol and gamepad testing
+poc/           the original feasibility probes
+```
+
+Protocol is documented in [PROTOCOL.md](PROTOCOL.md).
+
+## Licences
+
+Vendored third-party code, all permissive:
+
+- [nv-codec-headers](https://github.com/FFmpeg/nv-codec-headers) — NVENC API
+  header, MIT-style (notice at the top of the header)
+- [ViGEmClient](https://github.com/nefarius/ViGEmClient) — MIT

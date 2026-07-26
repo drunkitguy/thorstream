@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">thorstream</string>
+    <string name="subtitle">Stream one game window from your PC.</string>
+    <string name="hint_host">PC IP address</string>
+    <string name="hint_bitrate">kbps</string>
+    <string name="hint_fps">fps</string>
+    <string name="connect">Connect</string>
+    <string name="status_idle">Enter your PC\'s IP address and connect.</string>
+</resources>
