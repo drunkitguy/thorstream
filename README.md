@@ -150,6 +150,40 @@ To check what is already allowed:
 Get-NetFirewallRule -DisplayName "*thorstream*" | Select-Object DisplayName, Profile, Enabled
 ```
 
+### The controller does nothing
+
+On startup the host reports which XInput slot the driver gave it:
+
+```
+Virtual Xbox 360 pad ready (XInput slot 0).
+```
+
+If it says the pad has **no** slot, or games ignore it while the host logs
+`receiving gamepad input from the client`, the usual cause is an **orphaned
+virtual pad** squatting on the slot. ViGEm creates a device node per pad, and a
+host that is killed rather than stopped can leave one behind; the orphan takes
+the XInput slot and never responds, so a new pad is shadowed by a dead one.
+
+To check, stop every host and list what remains:
+
+```powershell
+Get-PnpDevice -Class XnaComposite | Select-Object Status, InstanceId
+```
+
+With no host running there should be **nothing** with status `OK`. Anything
+still `OK` and located on the "Virtual Gamepad Emulation Bus" is an orphan. A
+reboot clears them.
+
+This should not happen any more — the host installs a console control handler
+and unplugs the pad on Ctrl+C — but a hard kill (`taskkill /F`, a crash) can
+still strand one.
+
+To rule out the network entirely and test the driver on its own:
+
+```bash
+thorstream-host.exe --gamepad-selftest
+```
+
 ### The client cannot see the host
 
 - Confirm both devices are on the same network — a "guest" Wi-Fi network is
