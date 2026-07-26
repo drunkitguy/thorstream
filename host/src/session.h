@@ -25,6 +25,8 @@ public:
 
     // Set by main once ViGEm is available; may be null.
     std::function<void(const protocol::GamepadState&)> onGamepad;
+    // Invoked when a session ends, so held buttons can be released.
+    std::function<void()> onReleaseInput;
 
 private:
     bool StartSession(const StartRequest& request, int* outWidth, int* outHeight,

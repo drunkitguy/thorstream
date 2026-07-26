@@ -20,14 +20,23 @@ public:
     // Returns nullptr with `error` set if the ViGEmBus driver is missing.
     static std::unique_ptr<VirtualGamepad> Create(std::string* error);
 
-    void Submit(const protocol::GamepadState& state);
+    // Returns false if the driver rejected the update; `error` explains why.
+    bool Submit(const protocol::GamepadState& state, std::string* error = nullptr);
+
+    // Zeroes every button and axis. Called when a client goes away so a
+    // disconnect mid-press does not leave the game holding forward forever.
+    void ReleaseAll();
+
+    // The XInput slot the driver assigned, or -1 if it has not reported one.
+    // Worth logging: if this is -1, games will never see the pad no matter how
+    // happily the driver accepts updates.
+    int XInputSlot() const;
 
 private:
     struct Impl;
     VirtualGamepad();
 
     std::unique_ptr<Impl> impl_;
-    uint32_t lastSequence_ = 0;
 };
 
 }  // namespace thorstream

@@ -137,6 +137,10 @@ bool Session::StartSession(const StartRequest& request, int* outWidth, int* outH
 }
 
 void Session::StopSession() {
+    // Before tearing anything down: a client that vanished mid-press would
+    // otherwise leave the virtual pad holding those inputs indefinitely.
+    if (onReleaseInput) onReleaseInput();
+
     std::unique_ptr<WindowCapture> capture;
     std::unique_ptr<NvencEncoder> encoder;
     {

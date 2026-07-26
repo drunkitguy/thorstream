@@ -223,9 +223,25 @@ void StreamServer::HandleMessage(protocol::MessageType type, const uint8_t* data
 
         case protocol::MessageType::Gamepad: {
             protocol::GamepadState state{};
-            if (reader.Raw(&state, sizeof(state)) && callbacks_.onGamepad) {
-                callbacks_.onGamepad(state);
+            if (!reader.Raw(&state, sizeof(state))) {
+                wprintf(L"malformed GAMEPAD message (%zu bytes, expected %zu)\n", size,
+                        sizeof(state));
+                break;
             }
+            if (!callbacks_.onGamepad) {
+                if (!warnedNoGamepadSink_) {
+                    warnedNoGamepadSink_ = true;
+                    wprintf(L"input received but no virtual pad is attached - ignoring\n");
+                }
+                break;
+            }
+            if (!sawGamepadInput_) {
+                sawGamepadInput_ = true;
+                wprintf(L"receiving gamepad input from the client (first packet: ");
+                for (size_t i = 0; i < size && i < sizeof(state); ++i) wprintf(L"%02X ", data[i]);
+                wprintf(L") buttons=0x%04X lx=%d\n", state.buttons, state.leftStickX);
+            }
+            callbacks_.onGamepad(state);
             break;
         }
         case protocol::MessageType::Ping: {

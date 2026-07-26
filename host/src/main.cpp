@@ -58,6 +58,70 @@ void PrintLocalAddresses(int port) {
     freeaddrinfo(results);
 }
 
+// Signalled by the console control handler so shutdown runs on the main thread.
+HANDLE g_shutdownEvent = nullptr;
+
+BOOL WINAPI ConsoleHandler(DWORD signal) {
+    switch (signal) {
+        case CTRL_C_EVENT:
+        case CTRL_BREAK_EVENT:
+        case CTRL_CLOSE_EVENT:
+        case CTRL_LOGOFF_EVENT:
+        case CTRL_SHUTDOWN_EVENT:
+            if (g_shutdownEvent) SetEvent(g_shutdownEvent);
+            // Give the main thread a moment to unplug the virtual pad. Returning
+            // immediately lets Windows kill us first, which strands the pad and
+            // leaves games seeing a phantom controller.
+            Sleep(1500);
+            return TRUE;
+        default:
+            return FALSE;
+    }
+}
+
+// Drives the virtual pad directly, with no networking in the way, so a failure
+// here points at ViGEm rather than at the protocol.
+int RunGamepadSelfTest() {
+    std::string error;
+    auto gamepad = VirtualGamepad::Create(&error);
+    if (!gamepad) {
+        wprintf(L"Could not create the virtual pad: %hs\n", error.c_str());
+        return 1;
+    }
+    wprintf(L"Virtual pad attached (XInput slot %d). Driving it directly...\n",
+            gamepad->XInputSlot());
+
+    const struct {
+        const wchar_t* name;
+        uint16_t buttons;
+        int16_t leftX;
+    } steps[] = {
+        {L"A", 0x1000, 0},
+        {L"A+B+X+Y", 0xF000, 0},
+        {L"left stick right", 0, 32000},
+        {L"released", 0, 0},
+    };
+
+    int failures = 0;
+    for (const auto& step : steps) {
+        protocol::GamepadState state{};
+        state.buttons = step.buttons;
+        state.leftStickX = step.leftX;
+        state.sequence = 1;
+
+        std::string submitError;
+        const bool ok = gamepad->Submit(state, &submitError);
+        wprintf(L"  %-20s -> %hs\n", step.name, ok ? "accepted" : submitError.c_str());
+        if (!ok) ++failures;
+        Sleep(400);
+    }
+
+    wprintf(failures == 0 ? L"\nDriver accepted every update.\n"
+                          : L"\n%d update(s) were rejected by the driver.\n",
+            failures);
+    return failures == 0 ? 0 : 1;
+}
+
 int RunServer(const Options& opts) {
     auto device = CreateGraphicsDevice();
     Session session(device);
@@ -66,10 +130,25 @@ int RunServer(const Options& opts) {
     std::string gamepadError;
     auto gamepad = VirtualGamepad::Create(&gamepadError);
     if (gamepad) {
-        wprintf(L"Virtual Xbox 360 pad ready.\n");
-        session.onGamepad = [pad = gamepad.get()](const protocol::GamepadState& state) {
-            pad->Submit(state);
+        const int slot = gamepad->XInputSlot();
+        if (slot >= 0) {
+            wprintf(L"Virtual Xbox 360 pad ready (XInput slot %d).\n", slot);
+        } else {
+            wprintf(L"Virtual Xbox 360 pad attached but the driver has not assigned it an "
+                    L"XInput slot - games will not see it. Stale virtual pads from a host that "
+                    L"did not shut down cleanly are the usual cause; a reboot clears them.\n");
+        }
+        // Report the first rejection rather than dropping input silently: a
+        // controller that does nothing with no explanation is the worst outcome.
+        session.onGamepad = [pad = gamepad.get(), warned = std::make_shared<bool>(false)](
+                                const protocol::GamepadState& state) {
+            std::string submitError;
+            if (!pad->Submit(state, &submitError) && !*warned) {
+                *warned = true;
+                wprintf(L"virtual pad rejected input: %hs\n", submitError.c_str());
+            }
         };
+        session.onReleaseInput = [pad = gamepad.get()] { pad->ReleaseAll(); };
     } else {
         wprintf(L"Gamepad input disabled: %hs\n", gamepadError.c_str());
     }
@@ -86,7 +165,15 @@ int RunServer(const Options& opts) {
     wprintf(L"\nPress Ctrl+C to stop.\n\n");
 
     // The server runs on its own threads; park here until the user interrupts.
-    while (true) Sleep(1000);
+    // Waiting on an event rather than spinning means Ctrl+C unwinds properly and
+    // the virtual gamepad gets unplugged.
+    WaitForSingleObject(g_shutdownEvent, INFINITE);
+
+    wprintf(L"\nShutting down...\n");
+    session.Shutdown();
+    gamepad.reset();
+    wprintf(L"Stopped cleanly.\n");
+    return 0;
 }
 
 void PrintWindows(const std::vector<WindowEntry>& windows) {
@@ -267,6 +354,7 @@ int wmain(int argc, wchar_t** argv) {
         else if (arg == L"--fps") opts.fpsCap = next();
         else if (arg == L"--port") opts.port = next();
         else if (arg == L"--serve") opts.serve = true;
+        else if (arg == L"--gamepad-selftest") return RunGamepadSelfTest();
         else if (arg == L"--encode") opts.encode = true;
         else if (arg == L"--hevc") { opts.hevc = true; opts.encode = true; }
         else if (arg.rfind(L"--", 0) == 0) { wprintf(L"Unknown option %s\n", arg.c_str()); return 2; }
@@ -280,7 +368,11 @@ int wmain(int argc, wchar_t** argv) {
         return 2;
     }
 
-    if (opts.serve) return RunServer(opts);
+    if (opts.serve) {
+        g_shutdownEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        SetConsoleCtrlHandler(ConsoleHandler, TRUE);
+        return RunServer(opts);
+    }
 
     const auto windows = EnumerateCapturableWindows();
     if (windows.empty()) {

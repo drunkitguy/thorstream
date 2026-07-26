@@ -80,6 +80,11 @@ private:
 
     std::vector<uint8_t> videoDestination_;  // sockaddr_in, opaque here
     std::atomic<uint32_t> frameNumber_{0};
+
+    // One-shot diagnostics, so "is my controller working?" is answerable from
+    // the host console without turning input into a log firehose.
+    bool sawGamepadInput_ = false;
+    bool warnedNoGamepadSink_ = false;
 };
 
 }  // namespace thorstream

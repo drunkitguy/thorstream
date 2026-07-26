@@ -24,6 +24,8 @@ internal static class GamepadTest
     {
         public uint dwPacketNumber;
         public XInputGamepad Gamepad;
+
+        public long packetDelta(XInputState earlier) => (long)dwPacketNumber - earlier.dwPacketNumber;
     }
 
     [DllImport("xinput1_4.dll")]
@@ -33,6 +35,35 @@ internal static class GamepadTest
 
     private record Step(string Name, ushort Buttons, byte LeftTrigger, byte RightTrigger,
                         short LeftX, short LeftY, short RightX, short RightY);
+
+    /// Holds a button combination down so an external tool can observe the pad.
+    public static async Task<int> HoldAsync(string host, int port, int seconds)
+    {
+        using var tcp = new TcpClient();
+        await tcp.ConnectAsync(host, port);
+        tcp.NoDelay = true;
+        var stream = tcp.GetStream();
+
+        var hello = new Writer();
+        hello.U16(1);
+        hello.Str("gamepad-hold");
+        await SendAsync(stream, MessageType.Hello, hello);
+        await Task.Delay(300);
+
+        const ushort combo = 0x1000 | 0x2000 | 0x4000 | 0x8000;
+        Console.WriteLine($"holding A+B+X+Y (0x{combo:X4}) for {seconds}s...");
+
+        var deadline = DateTime.UtcNow.AddSeconds(seconds);
+        while (DateTime.UtcNow < deadline)
+        {
+            await SendButtonsAsync(stream, combo);
+            await Task.Delay(100);
+        }
+
+        await SendButtonsAsync(stream, 0);
+        Console.WriteLine("released.");
+        return 0;
+    }
 
     public static async Task<int> RunAsync(string host, int port)
     {
@@ -48,14 +79,15 @@ internal static class GamepadTest
         await SendAsync(stream, MessageType.Hello, hello);
         await Task.Delay(500);
 
-        int slot = FindVirtualPad();
+        int slot = await FindOurPadAsync(stream);
         if (slot < 0)
         {
-            Console.WriteLine("\nNo XInput controller found. Is the host running with --serve,");
-            Console.WriteLine("and did it report 'Virtual Xbox 360 pad ready'?");
+            Console.WriteLine("\nCould not find a virtual pad responding to us.");
+            Console.WriteLine("Is the host running with --serve, and did it report");
+            Console.WriteLine("'Virtual Xbox 360 pad ready'?");
             return 1;
         }
-        Console.WriteLine($"found an XInput pad in slot {slot}\n");
+        Console.WriteLine($"our pad is XInput slot {slot}\n");
 
         var steps = new[]
         {
@@ -69,12 +101,10 @@ internal static class GamepadTest
             new Step("released",             0,      0,   0,   0,      0,     0,     0),
         };
 
-        uint sequence = 0;
         int passed = 0;
 
         foreach (var step in steps)
         {
-            sequence++;
             var payload = new Writer();
             payload.U16(step.Buttons);
             payload.U8(step.LeftTrigger);
@@ -83,7 +113,7 @@ internal static class GamepadTest
             payload.U16((ushort)step.LeftY);
             payload.U16((ushort)step.RightX);
             payload.U16((ushort)step.RightY);
-            payload.U32(sequence);
+            payload.U32(++sequence);
             await SendAsync(stream, MessageType.Gamepad, payload);
 
             await Task.Delay(120);
@@ -111,14 +141,50 @@ internal static class GamepadTest
     // XInput can quantise thumbstick values slightly on the way through.
     private static bool Close(short actual, short expected) => Math.Abs(actual - expected) <= 256;
 
-    private static int FindVirtualPad()
+    /// <summary>
+    /// Identifies which XInput slot is ours by pressing a distinctive combination
+    /// and seeing which slot reacts. Taking the first connected slot is wrong: a
+    /// real controller, or a pad stranded by a host that did not shut down
+    /// cleanly, can sit in a lower slot and report nothing forever.
+    /// </summary>
+    private static async Task<int> FindOurPadAsync(NetworkStream stream)
     {
+        const ushort probe = 0x1000 | 0x2000 | 0x4000 | 0x8000; // A+B+X+Y at once
+
+        var before = new XInputState[4];
+        for (int i = 0; i < 4; i++) XInputGetState(i, ref before[i]);
+
+        await SendButtonsAsync(stream, probe);
+        await Task.Delay(250);
+
+        int found = -1;
         for (int i = 0; i < 4; i++)
         {
-            var state = new XInputState();
-            if (XInputGetState(i, ref state) == ERROR_SUCCESS) return i;
+            var now = new XInputState();
+            int result = XInputGetState(i, ref now);
+            Console.WriteLine($"    probe slot {i}: rc={result} packet={now.packetDelta(before[i])} " +
+                              $"buttons=0x{now.Gamepad.wButtons:X4} (want 0x{probe:X4})");
+            if (result != ERROR_SUCCESS) continue;
+            if (now.Gamepad.wButtons == probe) { found = i; break; }
         }
-        return -1;
+
+        await SendButtonsAsync(stream, 0); // release
+        await Task.Delay(150);
+        return found;
+    }
+
+    // One monotonic counter for the whole run: the host drops input that appears
+    // to go backwards, so the probe must not restart the sequence.
+    private static uint sequence;
+
+    private static async Task SendButtonsAsync(NetworkStream stream, ushort buttons)
+    {
+        var payload = new Writer();
+        payload.U16(buttons);
+        payload.U8(0); payload.U8(0);
+        payload.U16(0); payload.U16(0); payload.U16(0); payload.U16(0);
+        payload.U32(++sequence);
+        await SendAsync(stream, MessageType.Gamepad, payload);
     }
 
     private static async Task SendAsync(NetworkStream stream, MessageType type, Writer payload)

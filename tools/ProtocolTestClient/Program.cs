@@ -25,6 +25,15 @@ internal static class Program
 
     private static async Task<int> Main(string[] args)
     {
+        if (args.Contains("--gamepad-hold"))
+        {
+            var rest = args.Where(a => a != "--gamepad-hold").ToArray();
+            return await GamepadTest.HoldAsync(
+                rest.Length > 0 ? rest[0] : "127.0.0.1",
+                rest.Length > 1 ? int.Parse(rest[1]) : 47810,
+                rest.Length > 2 ? int.Parse(rest[2]) : 8);
+        }
+
         if (args.Contains("--gamepad"))
         {
             var rest = args.Where(a => a != "--gamepad").ToArray();
