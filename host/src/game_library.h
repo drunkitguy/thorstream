@@ -13,6 +13,8 @@ struct GameEntry {
     std::string platform;
     std::string source;
     std::string installDirectory;
+    // Absolute path to Playnite's cover art, or empty.
+    std::wstring coverPath;
     bool installed = false;
 };
 

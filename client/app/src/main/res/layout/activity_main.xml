@@ -1,38 +1,46 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- First screen: choose which PC to stream from. Deliberately sparse - the
+     library is the screen you actually spend time on. -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:padding="20dp">
+    android:background="#0E1116"
+    android:gravity="center_vertical"
+    android:padding="32dp">
 
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:text="@string/app_name"
-        android:textSize="24sp"
+        android:textColor="#FFFFFF"
+        android:textSize="28sp"
         android:textStyle="bold" />
 
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginBottom="12dp"
-        android:text="@string/subtitle"
-        android:textSize="13sp" />
+        android:layout_marginBottom="24dp"
+        android:text="@string/pick_pc"
+        android:textColor="#8A93A0"
+        android:textSize="14sp" />
+
+    <EditText
+        android:id="@+id/hostInput"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:autofillHints="192.168.1.10"
+        android:hint="@string/hint_host"
+        android:inputType="text"
+        android:imeOptions="actionDone"
+        android:textColor="#FFFFFF"
+        android:textColorHint="#5A6474" />
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
         android:orientation="horizontal">
-
-        <EditText
-            android:id="@+id/hostInput"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="2"
-            android:autofillHints="192.168.1.10"
-            android:hint="@string/hint_host"
-            android:inputType="text"
-            android:imeOptions="actionDone" />
 
         <EditText
             android:id="@+id/bitrateInput"
@@ -41,7 +49,9 @@
             android:layout_weight="1"
             android:autofillHints="30000"
             android:hint="@string/hint_bitrate"
-            android:inputType="number" />
+            android:inputType="number"
+            android:textColor="#FFFFFF"
+            android:textColorHint="#5A6474" />
 
         <EditText
             android:id="@+id/fpsInput"
@@ -50,36 +60,25 @@
             android:layout_weight="1"
             android:autofillHints="60"
             android:hint="@string/hint_fps"
-            android:inputType="number" />
+            android:inputType="number"
+            android:textColor="#FFFFFF"
+            android:textColorHint="#5A6474" />
     </LinearLayout>
-
-    <Button
-        android:id="@+id/toggleButton"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:text="@string/show_windows" />
 
     <Button
         android:id="@+id/connectButton"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
+        android:layout_marginTop="20dp"
         android:text="@string/connect" />
 
     <TextView
         android:id="@+id/statusText"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
-        android:layout_marginBottom="8dp"
+        android:layout_marginTop="16dp"
         android:text="@string/status_idle"
+        android:textColor="#8A93A0"
         android:textSize="13sp" />
-
-    <ListView
-        android:id="@+id/windowList"
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1" />
 
 </LinearLayout>

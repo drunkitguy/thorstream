@@ -15,7 +15,8 @@ internal record GameEntry(
     string Source,
     bool Installed,
     string InstallDirectory,
-    string Action);
+    string Action,
+    string CoverImage);
 
 internal static class Program
 {
@@ -93,7 +94,7 @@ internal static class Program
             {
                 Console.WriteLine(string.Join('\t',
                     Clean(game.Id), Clean(game.Name), Clean(game.Platform), Clean(game.Source),
-                    game.Installed ? "1" : "0", Clean(game.InstallDirectory)));
+                    game.Installed ? "1" : "0", Clean(game.InstallDirectory), Clean(game.CoverImage)));
             }
             return 0;
         }
@@ -142,7 +143,8 @@ internal static class Program
                 Source: Lookup(doc, "SourceId", sources),
                 Installed: doc.ContainsKey("IsInstalled") && doc["IsInstalled"].AsBoolean,
                 InstallDirectory: Str(doc, "InstallDirectory"),
-                Action: DescribeAction(doc)));
+                Action: DescribeAction(doc),
+                CoverImage: Str(doc, "CoverImage")));
         }
         return result;
     }

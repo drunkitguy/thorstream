@@ -82,6 +82,7 @@ private:
     void SendMessage(protocol::MessageType type, const protocol::Writer& payload);
     void SendWindowList();
     void SendGameList();
+    void SendCover(const std::string& gameId);
     void HandleStart(protocol::Reader& reader);
     void HandleLaunch(protocol::Reader& reader);
 

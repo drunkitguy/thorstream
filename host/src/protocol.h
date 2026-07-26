@@ -34,7 +34,16 @@ enum class MessageType : uint8_t {
     GameList = 0x0B,       // host -> client
     Launch = 0x0C,         // client -> host
     LaunchProgress = 0x0D, // host -> client: games take a while to start
+
+    // Cover art is fetched lazily, one game at a time, rather than bundled into
+    // the game list: full-size artwork is over a megabyte per title.
+    CoverRequest = 0x0E,  // client -> host: game id
+    CoverData = 0x0F,     // host -> client: game id, then JPEG bytes (empty if none)
 };
+
+// Covers are scaled to this width before sending. Big enough for a tile on a
+// 1080p handheld, small enough that a whole library is a few megabytes.
+inline constexpr int kCoverWidth = 342;
 
 enum class Codec : uint8_t { H264 = 0, Hevc = 1 };
 

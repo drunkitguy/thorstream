@@ -8,5 +8,8 @@
     <string name="connect">Connect</string>
     <string name="show_windows">Show open windows</string>
     <string name="show_games">Show games</string>
+    <string name="library_title">Your games</string>
+    <string name="cover_description">Game cover</string>
+    <string name="pick_pc">Choose your PC</string>
     <string name="status_idle">Enter your PC\'s IP address and connect.</string>
 </resources>

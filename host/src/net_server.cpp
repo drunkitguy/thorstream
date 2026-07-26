@@ -5,6 +5,8 @@
 
 #include <cstdio>
 
+#include "cover_art.h"
+
 #pragma comment(lib, "Ws2_32.lib")
 
 namespace thorstream {
@@ -221,6 +223,12 @@ void StreamServer::HandleMessage(protocol::MessageType type, const uint8_t* data
             HandleLaunch(reader);
             break;
 
+        case protocol::MessageType::CoverRequest: {
+            std::string gameId;
+            if (reader.Str(gameId)) SendCover(gameId);
+            break;
+        }
+
         case protocol::MessageType::Stop:
             if (streaming_.exchange(false) && callbacks_.stopSession) callbacks_.stopSession();
             break;
@@ -297,6 +305,30 @@ void StreamServer::SendGameList() {
     }
     SendMessage(protocol::MessageType::GameList, out);
     wprintf(L"sent %zu games from the Playnite library\n", games.size());
+}
+
+void StreamServer::SendCover(const std::string& gameId) {
+    std::vector<uint8_t> jpeg;
+
+    if (callbacks_.listGames) {
+        // Cheap enough at this size, and it keeps the server from holding its own
+        // copy of the library that could go stale behind Playnite's back.
+        for (const auto& game : callbacks_.listGames()) {
+            if (game.id != gameId) continue;
+            if (!game.coverPath.empty()) {
+                CoverArt::LoadThumbnail(game.coverPath, protocol::kCoverWidth, &jpeg);
+            }
+            break;
+        }
+    }
+
+    // Always reply, even with nothing: a client waiting on a cover that will
+    // never arrive would leave a permanently blank tile.
+    protocol::Writer out;
+    out.Str(gameId);
+    out.U32(static_cast<uint32_t>(jpeg.size()));
+    out.Raw(jpeg.data(), jpeg.size());
+    SendMessage(protocol::MessageType::CoverData, out);
 }
 
 void StreamServer::SendLaunchProgress(const std::string& message) {

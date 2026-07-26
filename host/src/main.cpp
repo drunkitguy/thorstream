@@ -19,7 +19,9 @@
 #include <string>
 #include <vector>
 
+#include "cover_art.h"
 #include "d3d_device.h"
+#include "game_library.h"
 #include "encoder_nvenc.h"
 #include "gamepad_vigem.h"
 #include "save_png.h"
@@ -331,6 +333,58 @@ int RunDisplaySwitchTest(int width, int height, int seconds) {
     return restored ? 0 : 1;
 }
 
+// Reads the library and converts a few covers, reporting the size reduction.
+// Verifies path resolution, decoding and re-encoding without a client involved.
+int RunCoverTest() {
+    std::string error;
+    const auto games = GameLibrary::Read(&error);
+    if (games.empty()) {
+        wprintf(L"No games: %hs\n", error.c_str());
+        return 1;
+    }
+
+    wprintf(L"%zu games. Converting covers at %dpx wide:\n\n", games.size(), protocol::kCoverWidth);
+
+    int converted = 0, missing = 0;
+    uint64_t originalBytes = 0, thumbnailBytes = 0;
+
+    for (const auto& game : games) {
+        if (game.coverPath.empty()) {
+            ++missing;
+            continue;
+        }
+
+        WIN32_FILE_ATTRIBUTE_DATA attributes{};
+        uint64_t originalSize = 0;
+        if (GetFileAttributesExW(game.coverPath.c_str(), GetFileExInfoStandard, &attributes)) {
+            originalSize = (static_cast<uint64_t>(attributes.nFileSizeHigh) << 32) |
+                           attributes.nFileSizeLow;
+        }
+
+        std::vector<uint8_t> jpeg;
+        if (!CoverArt::LoadThumbnail(game.coverPath, protocol::kCoverWidth, &jpeg)) {
+            wprintf(L"  FAILED  %hs\n", game.name.c_str());
+            ++missing;
+            continue;
+        }
+
+        ++converted;
+        originalBytes += originalSize;
+        thumbnailBytes += jpeg.size();
+        if (converted <= 5) {
+            wprintf(L"  %-42hs %6llu KB -> %5llu KB\n", game.name.c_str(),
+                    static_cast<unsigned long long>(originalSize / 1024),
+                    static_cast<unsigned long long>(jpeg.size() / 1024));
+        }
+    }
+
+    wprintf(L"\n%d converted, %d without usable art\n", converted, missing);
+    wprintf(L"Whole library: %llu KB -> %llu KB\n",
+            static_cast<unsigned long long>(originalBytes / 1024),
+            static_cast<unsigned long long>(thumbnailBytes / 1024));
+    return converted > 0 ? 0 : 1;
+}
+
 // Drives the virtual pad directly, with no networking in the way, so a failure
 // here points at ViGEm rather than at the protocol.
 int RunGamepadSelfTest() {
@@ -634,6 +688,7 @@ int wmain(int argc, wchar_t** argv) {
         else if (arg == L"--gamepad-selftest") return RunGamepadSelfTest();
         else if (arg == L"--stop") return RunStop();
 
+        else if (arg == L"--cover-test") return RunCoverTest();
         else if (arg == L"--vdisplay-probe") return RunVirtualDisplayProbe();
         else if (arg == L"--vdisplay-test") return RunVirtualDisplayTest(1920, 1080, 60, 10);
 

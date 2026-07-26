@@ -24,6 +24,7 @@ object Protocol {
     const val GAMEPAD: Byte = 0x07
     const val PING: Byte = 0x08
     const val LAUNCH: Byte = 0x0C
+    const val COVER_REQUEST: Byte = 0x0E
 
     // Host -> client
     const val WINDOW_LIST: Byte = 0x02
@@ -32,6 +33,7 @@ object Protocol {
     const val ERROR: Byte = 0x0A
     const val GAME_LIST: Byte = 0x0B
     const val LAUNCH_PROGRESS: Byte = 0x0D
+    const val COVER_DATA: Byte = 0x0F
 
     const val CODEC_H264: Byte = 0
     const val CODEC_HEVC: Byte = 1

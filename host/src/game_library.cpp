@@ -66,6 +66,13 @@ bool CaptureOutput(const std::wstring& commandLine, std::string* output, std::st
     return true;
 }
 
+// Cover paths in the database are relative to Playnite's library\files folder.
+std::wstring PlayniteFilesDir() {
+    wchar_t appData[MAX_PATH] = {};
+    if (!GetEnvironmentVariableW(L"APPDATA", appData, MAX_PATH)) return {};
+    return std::wstring(appData) + L"\\Playnite\\library\\files\\";
+}
+
 std::vector<std::string> SplitTabs(const std::string& line) {
     std::vector<std::string> fields;
     size_t start = 0;
@@ -127,6 +134,9 @@ std::vector<GameEntry> GameLibrary::Read(std::string* error) {
         game.source = fields[3];
         game.installed = fields[4] == "1";
         game.installDirectory = fields[5];
+        if (fields.size() > 6 && !fields[6].empty()) {
+            game.coverPath = PlayniteFilesDir() + std::wstring(fields[6].begin(), fields[6].end());
+        }
         if (!game.name.empty()) games.push_back(std::move(game));
     }
 

@@ -22,6 +22,7 @@ class ControlConnection(private val scope: CoroutineScope) {
     var onWindowList: ((List<WindowInfo>) -> Unit)? = null
     var onGameList: ((List<GameInfo>) -> Unit)? = null
     var onLaunchProgress: ((String) -> Unit)? = null
+    var onCover: ((String, ByteArray?) -> Unit)? = null
     var onStarted: ((SessionInfo) -> Unit)? = null
     var onError: ((String) -> Unit)? = null
     var onDisconnected: (() -> Unit)? = null
@@ -92,6 +93,9 @@ class ControlConnection(private val scope: CoroutineScope) {
                 .u16(udpPort),
         )
     }
+
+    fun requestCover(gameId: String) =
+        send(Protocol.COVER_REQUEST, ProtocolWriter().str(gameId))
 
     fun requestKeyframe() = send(Protocol.REQUEST_IDR, ProtocolWriter())
 
@@ -212,6 +216,16 @@ class ControlConnection(private val scope: CoroutineScope) {
             }
 
             Protocol.LAUNCH_PROGRESS -> onLaunchProgress?.invoke(reader.str())
+
+            Protocol.COVER_DATA -> {
+                val gameId = reader.str()
+                val length = reader.u32()
+                // A zero-length reply means the host has no art for this game;
+                // that is an answer, not a failure, and the tile should stop
+                // waiting for one.
+                val jpeg = if (length > 0) reader.bytes(length) else null
+                onCover?.invoke(gameId, jpeg)
+            }
 
             Protocol.PONG -> onPong?.invoke(reader.u64())
             Protocol.ERROR -> onError?.invoke(reader.str())
