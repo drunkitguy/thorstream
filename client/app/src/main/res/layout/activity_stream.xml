@@ -11,6 +11,18 @@
         android:layout_height="match_parent"
         android:layout_gravity="center" />
 
+    <!-- Invisible, but focusable: it exists purely to give the soft keyboard
+         somewhere to deliver text, which is then forwarded to the host. -->
+    <EditText
+        android:id="@+id/keyboardSink"
+        android:layout_width="1dp"
+        android:layout_height="1dp"
+        android:alpha="0"
+        android:inputType="text"
+        android:imeOptions="actionNone|flagNoExtractUi"
+        android:importantForAutofill="no"
+        android:autofillHints="" />
+
     <TextView
         android:id="@+id/title"
         android:layout_width="wrap_content"

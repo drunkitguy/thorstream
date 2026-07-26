@@ -1,6 +1,9 @@
 package com.thorstream.client
 
 import android.os.Build
+import android.text.Editable
+import android.text.TextWatcher
+import android.view.inputmethod.InputMethodManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -36,6 +39,12 @@ class StreamActivity : AppCompatActivity() {
     private var lastStatsFrames = 0L
     private var lastStatsBytes = 0L
 
+    private lateinit var touch: TouchController
+    private var keyboardVisible = false
+    private var selectHeld = false
+    private var startHeld = false
+    private var comboConsumed = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityStreamBinding.inflate(layoutInflater)
@@ -47,6 +56,15 @@ class StreamActivity : AppCompatActivity() {
         binding.title.text = intent.getStringExtra(EXTRA_TITLE) ?: "streaming"
 
         gamepad = GamepadTracker { state -> control?.sendGamepad(state) }
+
+        touch = TouchController(
+            onMove = { x, y -> control?.sendMouseMove(x, y) },
+            onButton = { button, pressed -> control?.sendMouseButton(button, pressed) },
+            onScroll = { delta -> control?.sendScroll(delta) },
+        )
+        binding.surface.setOnTouchListener { view, event -> touch.onTouch(view, event) }
+
+        setUpKeyboardSink()
 
         binding.surface.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) {
@@ -216,11 +234,97 @@ class StreamActivity : AppCompatActivity() {
         binding.status.text = message
     }
 
+    // ---- keyboard ------------------------------------------------------------
+
+    /**
+     * The hidden field the soft keyboard types into. Characters are forwarded as
+     * text; keys the host needs as keystrokes rather than characters - Enter,
+     * Backspace, arrows - are forwarded as virtual key codes instead.
+     */
+    private fun setUpKeyboardSink() {
+        binding.keyboardSink.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                if (count > before && s != null) {
+                    val added = s.subSequence(start + before, start + count).toString()
+                    if (added.isNotEmpty()) control?.sendText(added)
+                }
+            }
+            override fun afterTextChanged(s: Editable?) {
+                // Keep it empty so the next keystroke is always an insertion at 0
+                // and we never re-send what has already gone.
+                if (!s.isNullOrEmpty()) s.clear()
+            }
+        })
+
+        binding.keyboardSink.setOnKeyListener { _, keyCode, event ->
+            val virtualKey = windowsVirtualKey(keyCode) ?: return@setOnKeyListener false
+            control?.sendKey(virtualKey, event.action == KeyEvent.ACTION_DOWN)
+            true
+        }
+    }
+
+    private fun toggleKeyboard() {
+        val manager = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
+        keyboardVisible = !keyboardVisible
+
+        if (keyboardVisible) {
+            binding.keyboardSink.requestFocus()
+            manager.showSoftInput(binding.keyboardSink, InputMethodManager.SHOW_IMPLICIT)
+            setStatus("Keyboard open · Select+Start to close")
+        } else {
+            manager.hideSoftInputFromWindow(binding.keyboardSink.windowToken, 0)
+            binding.surface.requestFocus()
+            goImmersive()
+        }
+    }
+
+    /** Only the keys that must arrive as keystrokes rather than as text. */
+    private fun windowsVirtualKey(keyCode: Int): Int? = when (keyCode) {
+        KeyEvent.KEYCODE_ENTER -> 0x0D
+        KeyEvent.KEYCODE_DEL -> 0x08
+        KeyEvent.KEYCODE_ESCAPE -> 0x1B
+        KeyEvent.KEYCODE_TAB -> 0x09
+        KeyEvent.KEYCODE_DPAD_LEFT -> 0x25
+        KeyEvent.KEYCODE_DPAD_UP -> 0x26
+        KeyEvent.KEYCODE_DPAD_RIGHT -> 0x27
+        KeyEvent.KEYCODE_DPAD_DOWN -> 0x28
+        else -> null
+    }
+
     // ---- input ---------------------------------------------------------------
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         // Let the back button out so the user can leave the stream.
         if (event.keyCode == KeyEvent.KEYCODE_BACK) return super.dispatchKeyEvent(event)
+
+        // Select+Start opens the on-screen keyboard. Track both buttons and
+        // swallow them while the combination is held, so the game never sees a
+        // stray Start press from someone reaching for the keyboard.
+        if (event.keyCode == KeyEvent.KEYCODE_BUTTON_SELECT ||
+            event.keyCode == KeyEvent.KEYCODE_BUTTON_START
+        ) {
+            val down = event.action == KeyEvent.ACTION_DOWN
+            if (event.keyCode == KeyEvent.KEYCODE_BUTTON_SELECT) selectHeld = down
+            if (event.keyCode == KeyEvent.KEYCODE_BUTTON_START) startHeld = down
+
+            if (selectHeld && startHeld && down && !comboConsumed) {
+                comboConsumed = true
+                toggleKeyboard()
+                return true
+            }
+            if (!selectHeld && !startHeld) comboConsumed = false
+            // While the combo is armed, do not pass the individual button on.
+            if (comboConsumed) return true
+        }
+
+        // The soft keyboard needs the events when it is open.
+        if (keyboardVisible && event.keyCode != KeyEvent.KEYCODE_BUTTON_SELECT &&
+            event.keyCode != KeyEvent.KEYCODE_BUTTON_START
+        ) {
+            return super.dispatchKeyEvent(event)
+        }
+
         if (gamepad.onKey(event)) return true
         return super.dispatchKeyEvent(event)
     }

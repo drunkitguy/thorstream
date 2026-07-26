@@ -39,6 +39,13 @@ enum class MessageType : uint8_t {
     // the game list: full-size artwork is over a megabyte per title.
     CoverRequest = 0x0E,  // client -> host: game id
     CoverData = 0x0F,     // host -> client: game id, then JPEG bytes (empty if none)
+
+    // Touchscreen and on-screen keyboard, all client -> host.
+    MouseMove = 0x10,    // uint16 x, uint16 y, normalised across the desktop
+    MouseButton = 0x11,  // uint8 button, uint8 pressed
+    MouseScroll = 0x12,  // int16 delta, in wheel notches
+    Key = 0x13,          // uint16 virtual key, uint8 pressed
+    Text = 0x14,         // string, typed as Unicode
 };
 
 // Covers are scaled to this width before sending. Big enough for a tile on a

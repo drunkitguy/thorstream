@@ -25,6 +25,11 @@ object Protocol {
     const val PING: Byte = 0x08
     const val LAUNCH: Byte = 0x0C
     const val COVER_REQUEST: Byte = 0x0E
+    const val MOUSE_MOVE: Byte = 0x10
+    const val MOUSE_BUTTON: Byte = 0x11
+    const val MOUSE_SCROLL: Byte = 0x12
+    const val KEY: Byte = 0x13
+    const val TEXT: Byte = 0x14
 
     // Host -> client
     const val WINDOW_LIST: Byte = 0x02

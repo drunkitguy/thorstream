@@ -6,6 +6,7 @@
 #include <cstdio>
 
 #include "cover_art.h"
+#include "input_injector.h"
 
 #pragma comment(lib, "Ws2_32.lib")
 
@@ -260,6 +261,50 @@ void StreamServer::HandleMessage(protocol::MessageType type, const uint8_t* data
             callbacks_.onGamepad(state);
             break;
         }
+        case protocol::MessageType::MouseMove: {
+            uint16_t x = 0, y = 0;
+            if (reader.U16(x) && reader.U16(y)) InputInjector::MoveMouse(x, y);
+            break;
+        }
+
+        case protocol::MessageType::MouseButton: {
+            uint8_t button = 0, pressed = 0;
+            if (reader.U8(button) && reader.U8(pressed)) {
+                InputInjector::MouseButtonEvent(
+                    static_cast<InputInjector::MouseButton>(button), pressed != 0);
+            }
+            break;
+        }
+
+        case protocol::MessageType::MouseScroll: {
+            uint16_t delta = 0;
+            if (reader.U16(delta)) {
+                InputInjector::Scroll(static_cast<int16_t>(delta));
+            }
+            break;
+        }
+
+        case protocol::MessageType::Key: {
+            uint16_t key = 0;
+            uint8_t pressed = 0;
+            if (reader.U16(key) && reader.U8(pressed)) {
+                InputInjector::KeyEvent(key, pressed != 0);
+            }
+            break;
+        }
+
+        case protocol::MessageType::Text: {
+            std::string utf8;
+            if (!reader.Str(utf8) || utf8.empty()) break;
+            const int size = MultiByteToWideChar(CP_UTF8, 0, utf8.data(),
+                                                 static_cast<int>(utf8.size()), nullptr, 0);
+            std::wstring wide(static_cast<size_t>(size), L'\0');
+            MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()),
+                                wide.data(), size);
+            InputInjector::TypeText(wide);
+            break;
+        }
+
         case protocol::MessageType::Ping: {
             uint64_t clientTime = 0;
             if (reader.U64(clientTime)) {

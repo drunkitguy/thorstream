@@ -94,6 +94,20 @@ class ControlConnection(private val scope: CoroutineScope) {
         )
     }
 
+    /** Position is normalised 0..65535 across the host's desktop. */
+    fun sendMouseMove(x: Int, y: Int) =
+        send(Protocol.MOUSE_MOVE, ProtocolWriter().u16(x).u16(y))
+
+    fun sendMouseButton(button: Int, pressed: Boolean) =
+        send(Protocol.MOUSE_BUTTON, ProtocolWriter().u8(button).u8(if (pressed) 1 else 0))
+
+    fun sendScroll(delta: Int) = send(Protocol.MOUSE_SCROLL, ProtocolWriter().u16(delta))
+
+    fun sendKey(virtualKey: Int, pressed: Boolean) =
+        send(Protocol.KEY, ProtocolWriter().u16(virtualKey).u8(if (pressed) 1 else 0))
+
+    fun sendText(text: String) = send(Protocol.TEXT, ProtocolWriter().str(text))
+
     fun requestCover(gameId: String) =
         send(Protocol.COVER_REQUEST, ProtocolWriter().str(gameId))
 
