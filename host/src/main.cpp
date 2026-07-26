@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "cover_art.h"
+#include "cover_store.h"
 #include "d3d_device.h"
 #include "game_library.h"
 #include "encoder_nvenc.h"
@@ -684,6 +685,61 @@ int RunServer(const Options& opts) {
         }
         return status;
     };
+    // Reading the library spawns the Playnite helper, so it is cached rather
+    // than run for every tile the grid draws. Refresh in the page re-reads it.
+    auto libraryMutex = std::make_shared<std::mutex>();
+    auto libraryCache = std::make_shared<std::vector<GameEntry>>();
+    auto library = [libraryMutex, libraryCache](bool force) {
+        std::lock_guard<std::mutex> lock(*libraryMutex);
+        if (force || libraryCache->empty()) {
+            std::string libraryError;
+            auto games = GameLibrary::Read(&libraryError);
+            if (!games.empty()) *libraryCache = std::move(games);
+            else if (!libraryError.empty()) wprintf(L"Playnite: %hs\n", libraryError.c_str());
+        }
+        return *libraryCache;
+    };
+
+    console.games = [library] {
+        std::vector<ConsoleGame> rows;
+        for (const auto& game : library(true)) {
+            ConsoleGame row;
+            row.id = game.id;
+            row.name = game.name;
+            row.hasOverride = !CoverStore::Find(game.id).empty();
+            row.hasArt = row.hasOverride || !game.coverPath.empty();
+            rows.push_back(std::move(row));
+        }
+        return rows;
+    };
+    console.cover = [library](const std::string& id, std::vector<uint8_t>* jpeg) {
+        // Same precedence the handheld sees, so the grid is an honest preview.
+        if (const std::wstring own = CoverStore::Find(id); !own.empty()) {
+            return CoverArt::LoadThumbnail(own, protocol::kCoverWidth, jpeg);
+        }
+        for (const auto& game : library(false)) {
+            if (game.id != id) continue;
+            if (game.coverPath.empty()) return false;
+            return CoverArt::LoadThumbnail(game.coverPath, protocol::kCoverWidth, jpeg);
+        }
+        return false;
+    };
+    console.setCover = [](const std::string& id, const std::vector<uint8_t>& image,
+                          std::string* error) {
+        // Decode it before storing it. A file that WIC cannot read would
+        // otherwise be accepted here and simply show up as a blank tile on the
+        // handheld, with nothing to explain why.
+        if (!CoverStore::Save(id, image, error)) return false;
+        std::vector<uint8_t> probe;
+        if (!CoverArt::LoadThumbnail(CoverStore::Find(id), protocol::kCoverWidth, &probe)) {
+            CoverStore::Remove(id);
+            *error = "that file is not an image this host can decode";
+            return false;
+        }
+        return true;
+    };
+    console.clearCover = [](const std::string& id) { return CoverStore::Remove(id); };
+
     console.onStart = [&](std::string* error) { return startService(error); };
     console.onStop = [&] { stopService(); };
     console.onRestart = [&](std::string* error) {

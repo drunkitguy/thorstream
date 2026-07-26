@@ -69,6 +69,50 @@ std::string FormatBytes(uint64_t bytes) {
     return text;
 }
 
+// Generous enough for any cover art, small enough that a stuck upload cannot
+// exhaust memory.
+constexpr size_t kMaxUploadBytes = 16 * 1024 * 1024;
+
+// Case-insensitive, because header casing is at the client's discretion.
+size_t ContentLength(const std::string& headers) {
+    std::string lower;
+    lower.reserve(headers.size());
+    for (const char c : headers) lower += static_cast<char>(tolower(c));
+
+    const size_t at = lower.find("content-length:");
+    if (at == std::string::npos) return 0;
+    return static_cast<size_t>(strtoull(headers.c_str() + at + 15, nullptr, 10));
+}
+
+std::string QueryValue(const std::string& query, const std::string& key) {
+    const std::string needle = key + "=";
+    size_t at = query.find(needle);
+    while (at != std::string::npos) {
+        // Only a real parameter boundary counts, so "id=" does not match "gid=".
+        if (at == 0 || query[at - 1] == '&') {
+            const size_t start = at + needle.size();
+            const size_t end = query.find('&', start);
+            return query.substr(start, end == std::string::npos ? end : end - start);
+        }
+        at = query.find(needle, at + 1);
+    }
+    return {};
+}
+
+std::string GamesJson(const std::vector<ConsoleGame>& games) {
+    std::ostringstream json;
+    json << "[";
+    for (size_t i = 0; i < games.size(); ++i) {
+        if (i) json << ",";
+        json << "{\"id\":\"" << JsonEscape(games[i].id) << "\""
+             << ",\"name\":\"" << JsonEscape(games[i].name) << "\""
+             << ",\"hasArt\":" << (games[i].hasArt ? "true" : "false")
+             << ",\"hasOverride\":" << (games[i].hasOverride ? "true" : "false") << "}";
+    }
+    json << "]";
+    return json.str();
+}
+
 std::string StatusJson(const HostStatus& status) {
     std::ostringstream json;
     json << "{"
@@ -132,6 +176,28 @@ constexpr char kPage[] = R"PAGE(<!doctype html>
   button.danger { color:#ff9a9a; }
   .note { color:#6d7382; font-size:12px; margin-top:16px; }
   code { background:#232734; padding:1px 5px; border-radius:4px; font-size:12px; }
+
+  nav { display:flex; gap:4px; margin-bottom:16px; background:#1a1d26;
+        border:1px solid #272b37; border-radius:10px; padding:4px; }
+  nav button { flex:1; padding:8px; border:0; background:transparent; border-radius:7px;
+               color:#8b91a1; font-weight:550; }
+  nav button.sel { background:#2b6df5; color:#fff; }
+  .grid { display:grid; gap:14px; grid-template-columns:repeat(auto-fill,minmax(132px,1fr)); }
+  .tile { background:#1a1d26; border:1px solid #272b37; border-radius:11px;
+          overflow:hidden; display:flex; flex-direction:column; }
+  .art { aspect-ratio:2/3; background:#232734; display:flex; align-items:center;
+         justify-content:center; position:relative; }
+  .art img { width:100%; height:100%; object-fit:cover; display:block; }
+  .art .ph { font-size:34px; color:#3a4051; font-weight:700; }
+  .badge { position:absolute; top:6px; right:6px; background:#2b6df5; color:#fff;
+           font-size:10px; font-weight:600; padding:2px 6px; border-radius:20px; }
+  .tname { padding:8px 9px 6px; font-size:12px; line-height:1.3; color:#c8ccd6;
+           min-height:38px; overflow:hidden; }
+  .tact { display:flex; gap:5px; padding:0 7px 8px; }
+  .tact button { flex:1; padding:6px 4px; font-size:11px; border-radius:6px; }
+  .head { display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; }
+  .head span { color:#8b91a1; font-size:13px; }
+  .head button { flex:0 0 auto; padding:7px 14px; font-size:13px; }
 </style>
 </head>
 <body>
@@ -139,6 +205,12 @@ constexpr char kPage[] = R"PAGE(<!doctype html>
   <h1>thorstream host</h1>
   <div class="sub">Windows 11 &rarr; Ayn Thor</div>
 
+  <nav>
+    <button id="navStatus" class="sel" onclick="show('status')">Status</button>
+    <button id="navApps" onclick="show('apps')">Applications</button>
+  </nav>
+
+<div id="viewStatus">
   <div class="card">
     <div class="state"><span id="dot" class="dot off"></span><span id="state">checking...</span></div>
     <div id="error" class="err" hidden></div>
@@ -165,6 +237,21 @@ constexpr char kPage[] = R"PAGE(<!doctype html>
     </div>
   </div>
 </div>
+
+<div id="viewApps" hidden>
+  <div class="head">
+    <span id="appCount">loading...</span>
+    <button onclick="loadGames()">Refresh</button>
+  </div>
+  <div id="grid" class="grid"></div>
+  <div class="note">
+    Artwork you set here overrides Playnite's and is used on the handheld. It is
+    stored beside the host's own data &mdash; Playnite's library is never written to.
+  </div>
+</div>
+
+<input type="file" id="picker" accept="image/*" hidden>
+
 <script>
 let busy = false;
 
@@ -228,8 +315,88 @@ async function act(what) {
   refresh();
 }
 
+// ---- applications ---------------------------------------------------------
+
+let view = "status";
+let games = [];
+
+function show(which) {
+  view = which;
+  document.getElementById("viewStatus").hidden = which !== "status";
+  document.getElementById("viewApps").hidden = which !== "apps";
+  document.getElementById("navStatus").className = which === "status" ? "sel" : "";
+  document.getElementById("navApps").className = which === "apps" ? "sel" : "";
+  if (which === "apps" && !games.length) loadGames();
+}
+
+function escapeHtml(text) {
+  return text.replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+}
+
+async function loadGames() {
+  const count = document.getElementById("appCount");
+  count.textContent = "reading the library...";
+  try {
+    games = await (await fetch("games", {cache: "no-store"})).json();
+  } catch (e) {
+    count.textContent = "could not read the library";
+    return;
+  }
+  const missing = games.filter(g => !g.hasArt).length;
+  count.textContent = games.length + " games" + (missing ? " · " + missing + " without art" : "");
+  draw();
+}
+
+// Cache-busted per draw so a replaced cover shows immediately rather than
+// leaving the browser's copy of the old one on screen.
+function draw() {
+  const stamp = Date.now();
+  document.getElementById("grid").innerHTML = games.map(g => `
+    <div class="tile">
+      <div class="art">
+        ${g.hasArt
+          ? `<img loading="lazy" src="cover?id=${encodeURIComponent(g.id)}&v=${stamp}" alt="">`
+          : `<span class="ph">${escapeHtml((g.name[0] || "?").toUpperCase())}</span>`}
+        ${g.hasOverride ? `<span class="badge">custom</span>` : ``}
+      </div>
+      <div class="tname">${escapeHtml(g.name)}</div>
+      <div class="tact">
+        <button onclick="pick('${g.id}')">${g.hasArt ? "Replace" : "Add art"}</button>
+        ${g.hasOverride ? `<button class="danger" onclick="clearArt('${g.id}')">Reset</button>` : ``}
+      </div>
+    </div>`).join("");
+}
+
+const picker = document.getElementById("picker");
+
+function pick(id) {
+  picker.dataset.id = id;
+  picker.value = "";
+  picker.click();
+}
+
+picker.onchange = async () => {
+  const file = picker.files[0];
+  if (!file) return;
+  try {
+    // The File goes up as the raw request body. No multipart, no encoding.
+    const reply = await (await fetch("cover?id=" + encodeURIComponent(picker.dataset.id),
+      {method: "POST", body: file})).json();
+    if (!reply.ok) { alert(reply.error || "That image could not be saved."); return; }
+  } catch (e) {
+    alert("The upload failed.");
+    return;
+  }
+  await loadGames();
+};
+
+async function clearArt(id) {
+  await fetch("cover/clear?id=" + encodeURIComponent(id), {method: "POST"});
+  await loadGames();
+}
+
 refresh();
-setInterval(refresh, 2000);
+setInterval(() => { if (view === "status") refresh(); }, 2000);
 </script>
 </body>
 </html>
@@ -308,53 +475,109 @@ void WebConsole::AcceptLoop() {
 void WebConsole::HandleConnection(uintptr_t socketHandle) {
     const SOCKET socket = static_cast<SOCKET>(socketHandle);
 
-    // Read only far enough to see the end of the headers. Requests here carry no
-    // body, and the cap stops a malformed one from growing without bound.
     std::string request;
-    char buffer[2048];
-    while (request.size() < 16 * 1024) {
+    char buffer[8192];
+    size_t headerEnd = std::string::npos;
+    while (request.size() < 64 * 1024) {
         const int received = recv(socket, buffer, sizeof(buffer), 0);
         if (received <= 0) break;
         request.append(buffer, static_cast<size_t>(received));
-        if (request.find("\r\n\r\n") != std::string::npos) break;
+        headerEnd = request.find("\r\n\r\n");
+        if (headerEnd != std::string::npos) break;
     }
-    if (request.empty()) return;
+    if (headerEnd == std::string::npos) return;
 
-    const size_t methodEnd = request.find(' ');
+    const std::string headers = request.substr(0, headerEnd);
+    const size_t methodEnd = headers.find(' ');
     if (methodEnd == std::string::npos) return;
-    const size_t pathEnd = request.find(' ', methodEnd + 1);
-    if (pathEnd == std::string::npos) return;
+    const size_t targetEnd = headers.find(' ', methodEnd + 1);
+    if (targetEnd == std::string::npos) return;
 
-    const std::string method = request.substr(0, methodEnd);
-    std::string path = request.substr(methodEnd + 1, pathEnd - methodEnd - 1);
-    if (const size_t query = path.find('?'); query != std::string::npos) path.resize(query);
+    const std::string method = headers.substr(0, methodEnd);
+    std::string target = headers.substr(methodEnd + 1, targetEnd - methodEnd - 1);
+
+    std::string query;
+    if (const size_t mark = target.find('?'); mark != std::string::npos) {
+        query = target.substr(mark + 1);
+        target.resize(mark);
+    }
     // The page fetches relative URLs, so both "/status" and "status" arrive here
     // depending on how the browser resolved them.
-    if (!path.empty() && path.front() == '/') path.erase(0, 1);
+    if (!target.empty() && target.front() == '/') target.erase(0, 1);
+    const std::string id = QueryValue(query, "id");
 
-    if (method == "GET" && (path.empty() || path == "index.html")) {
+    // An upload arrives as the raw image file in the body - the browser can post
+    // a File directly, which avoids parsing multipart form data for no gain.
+    std::string body = request.substr(headerEnd + 4);
+    const size_t declared = ContentLength(headers);
+    if (declared > kMaxUploadBytes) {
+        SendResponse(socket, "413 Payload Too Large", "application/json",
+                     "{\"ok\":false,\"error\":\"that image is too large (16 MB limit)\"}");
+        return;
+    }
+    while (body.size() < declared) {
+        const int received = recv(socket, buffer, sizeof(buffer), 0);
+        if (received <= 0) break;
+        body.append(buffer, static_cast<size_t>(received));
+    }
+
+    if (method == "GET" && (target.empty() || target == "index.html")) {
         SendResponse(socket, "200 OK", "text/html; charset=utf-8", kPage);
         return;
     }
-    if (method == "GET" && path == "status") {
-        SendResponse(socket, "200 OK", "application/json",
-                     status ? StatusJson(status()) : "{}");
+    if (method == "GET" && target == "status") {
+        SendResponse(socket, "200 OK", "application/json", status ? StatusJson(status()) : "{}");
+        return;
+    }
+    if (method == "GET" && target == "games") {
+        SendResponse(socket, "200 OK", "application/json", games ? GamesJson(games()) : "[]");
         return;
     }
 
-    if (method == "POST" && (path == "start" || path == "stop" || path == "restart")) {
+    if (method == "GET" && target == "cover") {
+        std::vector<uint8_t> jpeg;
+        if (cover && cover(id, &jpeg) && !jpeg.empty()) {
+            SendResponse(socket, "200 OK", "image/jpeg",
+                         std::string(jpeg.begin(), jpeg.end()));
+        } else {
+            // The grid draws its own placeholder for these, so a 404 is the
+            // expected answer for a game with no art rather than an error.
+            SendResponse(socket, "404 Not Found", "text/plain", "no cover\n");
+        }
+        return;
+    }
+
+    if (method == "POST" && target == "cover") {
+        std::string uploadError;
+        const std::vector<uint8_t> image(body.begin(), body.end());
+        const bool ok = setCover && setCover(id, image, &uploadError);
+        SendResponse(socket, "200 OK", "application/json",
+                     ok ? "{\"ok\":true}"
+                        : "{\"ok\":false,\"error\":\"" + JsonEscape(uploadError) + "\"}");
+        return;
+    }
+
+    if (method == "POST" && target == "cover/clear") {
+        const bool ok = clearCover && clearCover(id);
+        SendResponse(socket, "200 OK", "application/json",
+                     ok ? "{\"ok\":true}"
+                        : "{\"ok\":false,\"error\":\"there was no custom cover to remove\"}");
+        return;
+    }
+
+    if (method == "POST" && (target == "start" || target == "stop" || target == "restart")) {
         std::string actionError;
         bool ok = true;
-        if (path == "start") {
+        if (target == "start") {
             ok = onStart ? onStart(&actionError) : false;
-        } else if (path == "stop") {
+        } else if (target == "stop") {
             if (onStop) onStop();
         } else {
             ok = onRestart ? onRestart(&actionError) : false;
         }
-        const std::string body = ok ? "{\"ok\":true}"
-                                    : "{\"ok\":false,\"error\":\"" + JsonEscape(actionError) + "\"}";
-        SendResponse(socket, "200 OK", "application/json", body);
+        SendResponse(socket, "200 OK", "application/json",
+                     ok ? "{\"ok\":true}"
+                        : "{\"ok\":false,\"error\":\"" + JsonEscape(actionError) + "\"}");
         return;
     }
 

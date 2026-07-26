@@ -26,6 +26,15 @@ struct HostStatus {
     std::vector<std::string> addresses;
 };
 
+// One row of the Applications grid. Deliberately not GameEntry: the console has
+// no business knowing about Playnite, install directories or launch ids.
+struct ConsoleGame {
+    std::string id;
+    std::string name;
+    bool hasArt = false;       // artwork exists, from either source
+    bool hasOverride = false;  // ...and it is one the user supplied
+};
+
 // A small control page for the host, because a GUI-subsystem background process
 // is otherwise completely opaque: no window, no console, and a log file you
 // cannot tell apart from a stale one.
@@ -45,6 +54,16 @@ public:
     std::function<bool(std::string*)> onStart;
     std::function<void()> onStop;
     std::function<bool(std::string*)> onRestart;
+
+    // Applications. `cover` returns the JPEG thumbnail shown in the grid;
+    // `setCover` takes the raw uploaded image file, and `clearCover` drops the
+    // override so Playnite's own art applies again.
+    std::function<std::vector<ConsoleGame>()> games;
+    std::function<bool(const std::string& id, std::vector<uint8_t>* jpeg)> cover;
+    std::function<bool(const std::string& id, const std::vector<uint8_t>& image,
+                       std::string* error)>
+        setCover;
+    std::function<bool(const std::string& id)> clearCover;
 
     bool Start(uint16_t port, std::string* error);
     void Stop();

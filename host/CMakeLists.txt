@@ -25,6 +25,7 @@ add_executable(thorstream-host
   src/game_library.cpp
   src/cover_art.cpp
   src/discovery.cpp
+  src/cover_store.cpp
   src/session_lock.cpp
   src/web_console.cpp
   src/input_injector.cpp

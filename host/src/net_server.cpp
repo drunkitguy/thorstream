@@ -6,6 +6,7 @@
 #include <cstdio>
 
 #include "cover_art.h"
+#include "cover_store.h"
 #include "input_injector.h"
 
 #pragma comment(lib, "Ws2_32.lib")
@@ -355,7 +356,14 @@ void StreamServer::SendGameList() {
 void StreamServer::SendCover(const std::string& gameId) {
     std::vector<uint8_t> jpeg;
 
-    if (callbacks_.listGames) {
+    // A cover the user set in the web console wins, and needs no library lookup
+    // at all - which also means it still works for a game Playnite has since
+    // forgotten about.
+    if (const std::wstring override = CoverStore::Find(gameId); !override.empty()) {
+        CoverArt::LoadThumbnail(override, protocol::kCoverWidth, &jpeg);
+    }
+
+    if (jpeg.empty() && callbacks_.listGames) {
         // Cheap enough at this size, and it keeps the server from holding its own
         // copy of the library that could go stale behind Playnite's back.
         for (const auto& game : callbacks_.listGames()) {
