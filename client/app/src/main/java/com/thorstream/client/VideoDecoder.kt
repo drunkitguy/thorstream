@@ -26,8 +26,16 @@ class VideoDecoder(private val surface: Surface) {
     @Volatile
     private var running = false
 
+    @Volatile
+    private var sawKeyframe = false
+
     var framesDecoded = 0L
         private set
+
+    var skippedBeforeKeyframe = 0
+        private set
+
+    val hasKeyframe: Boolean get() = sawKeyframe
 
     fun start(session: SessionInfo) {
         val mime = if (session.codec == Protocol.CODEC_HEVC) {
@@ -86,9 +94,23 @@ class VideoDecoder(private val surface: Surface) {
         Log.i(TAG, "decoder started: $mime ${session.width}x${session.height}")
     }
 
-    /** Queues a reassembled frame. Safe to call from the receiver thread. */
+    /**
+     * Queues a reassembled frame. Safe to call from the receiver thread.
+     *
+     * Frames are ignored until the first keyframe arrives. Feeding a decoder
+     * P-frames that reference a keyframe it never saw produces no output at all,
+     * which looks exactly like a dead stream.
+     */
     fun submit(frame: VideoFrame) {
         if (!running) return
+        if (!sawKeyframe) {
+            if (!frame.isKeyframe) {
+                skippedBeforeKeyframe++
+                return
+            }
+            sawKeyframe = true
+            Log.i(TAG, "first keyframe after skipping $skippedBeforeKeyframe frames")
+        }
         // If the decoder has fallen behind, dropping the backlog costs one glitch
         // and recovers latency; keeping it costs latency forever.
         if (pendingFrames.size > MAX_QUEUED_FRAMES) {
@@ -99,7 +121,12 @@ class VideoDecoder(private val surface: Surface) {
         pump()
     }
 
-    private fun pump() {
+    // pump() is entered from both the receiver thread (submit) and the codec's
+    // callback thread. Without this lock the peek/poll pair races and two
+    // threads can take the same frame.
+    private val pumpLock = Any()
+
+    private fun pump() = synchronized(pumpLock) {
         val decoder = codec ?: return
         while (running) {
             val frame = pendingFrames.peek() ?: return

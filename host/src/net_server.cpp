@@ -320,6 +320,11 @@ void StreamServer::HandleStart(protocol::Reader& reader) {
     out.Raw(sequenceHeader.data(), sequenceHeader.size());
     SendMessage(protocol::MessageType::Started, out);
 
+    // The encoder's opening IDR was produced before `streaming_` went true, so it
+    // was dropped rather than sent. Force another: without one the client decodes
+    // P-frames against a reference it never received and shows nothing at all.
+    if (callbacks_.onRequestIdr) callbacks_.onRequestIdr();
+
     wprintf(L"streaming %dx%d to udp port %u\n", actualWidth, actualHeight, request.clientUdpPort);
 }
 

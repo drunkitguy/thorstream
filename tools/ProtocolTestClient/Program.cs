@@ -119,6 +119,8 @@ internal static class Program
         var sw = Stopwatch.StartNew();
         long datagrams = 0, bytes = 0;
         int completed = 0, dropped = 0, keyframes = 0;
+        bool sawKeyframe = false;
+        int skippedBeforeKeyframe = 0, firstKeyframeAfter = -1;
         var cts = new CancellationTokenSource(TimeSpan.FromSeconds(seconds));
 
         try
@@ -133,6 +135,16 @@ internal static class Program
                 {
                     completed++;
                     if (keyframe) keyframes++;
+
+                    // Mirror the real client: a decoder cannot use P-frames that
+                    // reference a keyframe it never saw, so nothing before the
+                    // first keyframe is worth keeping.
+                    if (!sawKeyframe)
+                    {
+                        if (!keyframe) { skippedBeforeKeyframe++; continue; }
+                        sawKeyframe = true;
+                        firstKeyframeAfter = completed - 1;
+                    }
                     await file.WriteAsync(frame);
                 }
                 dropped += lost;
@@ -146,6 +158,9 @@ internal static class Program
         Console.WriteLine("=== RESULT ===");
         Console.WriteLine($"datagrams received : {datagrams}");
         Console.WriteLine($"frames reassembled : {completed} ({completed / sw.Elapsed.TotalSeconds:F1} fps), {keyframes} keyframes");
+        Console.WriteLine(sawKeyframe
+            ? $"first keyframe     : after {skippedBeforeKeyframe} unusable frames"
+            : "first keyframe     : NEVER ARRIVED - the client would show a black screen");
         Console.WriteLine($"frames dropped     : {dropped}");
         Console.WriteLine($"throughput         : {bytes * 8.0 / sw.Elapsed.TotalSeconds / 1e6:F2} Mbps");
         Console.WriteLine($"written to         : {outPath}");

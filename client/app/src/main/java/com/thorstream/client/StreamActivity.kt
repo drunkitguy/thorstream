@@ -91,6 +91,12 @@ class StreamActivity : AppCompatActivity() {
                     videoDecoder.start(session)
                     decoder = videoDecoder
                     sessionStarted = true
+                    // Anything the host sent before this moment went nowhere,
+                    // including the keyframe the stream opened with. Ask for a
+                    // fresh one rather than waiting for a decoder that will never
+                    // produce a picture.
+                    control?.requestKeyframe()
+                    lastIdrRequest = System.currentTimeMillis()
                     startStatsTicker()
                 } catch (e: Exception) {
                     Log.e(TAG, "decoder failed to start", e)
@@ -156,6 +162,9 @@ class StreamActivity : AppCompatActivity() {
                 updateStats()
                 control?.ping(nowMicros())
                 gamepad.heartbeat()
+                // A keyframe request can itself be lost, and until one lands the
+                // screen stays black with no other symptom. Keep asking.
+                decoder?.let { if (!it.hasKeyframe) requestKeyframeThrottled() }
                 handler.postDelayed(this, 1000)
             }
         })
@@ -170,6 +179,17 @@ class StreamActivity : AppCompatActivity() {
         val fps = (frames - lastStatsFrames) / elapsed
         lastStatsFrames = frames
         lastStatsTime = now
+
+        // Distinguish "no data" from "data arriving but undecodable". Both look
+        // like a black screen, and they have completely different causes.
+        val activeDecoder = decoder
+        if (activeDecoder != null && !activeDecoder.hasKeyframe) {
+            setStatus(
+                if (frames == 0L) "no video received — check the network"
+                else "waiting for a keyframe · $frames frames received"
+            )
+            return
+        }
 
         val latency = if (latencyMillis >= 0) "${latencyMillis}ms rtt" else "…"
         setStatus("%.0f fps · %s · %d dropped".format(fps, latency, videoReceiver.framesDropped))
