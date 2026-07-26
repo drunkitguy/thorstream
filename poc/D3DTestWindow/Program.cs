@@ -18,9 +18,17 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        bool colourBars = args.Contains("--bars");
+        args = args.Where(a => !a.StartsWith("--")).ToArray();
+
         int width = args.Length > 0 && int.TryParse(args[0], out int w) ? w : 1280;
         int height = args.Length > 1 && int.TryParse(args[1], out int h) ? h : 720;
         int seconds = args.Length > 2 && int.TryParse(args[2], out int s) ? s : 30;
+
+        // Without this the process is DPI-virtualised: it renders at the
+        // requested size and DWM upscales to the real client area, so the
+        // captured frame is a resampled copy rather than our exact pixels.
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
         Application.EnableVisualStyles();
 
@@ -36,7 +44,21 @@ internal static class Program
         };
         form.Show();
 
-        var renderer = new Renderer(form.Handle, width, height);
+        // ClientSize is in DIPs, so on a scaled display the window's real client
+        // area is larger. Building the swapchain from the requested size would
+        // leave DWM stretching our output, which quietly ruins any pixel-exact
+        // comparison downstream.
+        GetClientRect(form.Handle, out RECT client);
+        int physicalWidth = client.Right - client.Left;
+        int physicalHeight = client.Bottom - client.Top;
+        if (physicalWidth > 0 && physicalHeight > 0)
+        {
+            width = physicalWidth;
+            height = physicalHeight;
+        }
+        Console.WriteLine($"swapchain {width}x{height} (physical client area)");
+
+        var renderer = new Renderer(form.Handle, width, height, colourBars);
         var life = Stopwatch.StartNew();
         long frames = 0;
 
@@ -62,6 +84,17 @@ internal static class Program
     [DllImport("user32.dll")]
     private static extern bool PeekMessageW(out NativeMessage msg, IntPtr hWnd, uint min, uint max, uint remove);
 
+    [DllImport("user32.dll")]
+    private static extern bool GetClientRect(IntPtr hWnd, out RECT rect);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+
+    private static readonly IntPtr DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = new(-4);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT { public int Left, Top, Right, Bottom; }
+
     [StructLayout(LayoutKind.Sequential)]
     private struct NativeMessage { public IntPtr hWnd; public uint msg; public IntPtr w, l; public uint time; public System.Drawing.Point pt; }
 
@@ -77,10 +110,34 @@ internal sealed class Renderer : IDisposable
     private readonly ID3D11Texture2D _sprite;
     private readonly int _width, _height;
 
-    public Renderer(IntPtr hwnd, int width, int height)
+    /// <summary>
+    /// Exact RGB values, so a decoded frame can be compared against them
+    /// numerically instead of by eye. Primaries plus a greyscale ramp: hue
+    /// errors show in the primaries, range errors show at the ramp's ends.
+    /// </summary>
+    public static readonly (string Name, byte R, byte G, byte B)[] Bars =
+    {
+        ("white",   255, 255, 255),
+        ("yellow",  255, 255,   0),
+        ("cyan",      0, 255, 255),
+        ("green",     0, 255,   0),
+        ("magenta", 255,   0, 255),
+        ("red",     255,   0,   0),
+        ("blue",      0,   0, 255),
+        ("black",     0,   0,   0),
+        ("grey75",  191, 191, 191),
+        ("grey50",  128, 128, 128),
+        ("grey25",   64,  64,  64),
+        ("skin",    224, 172, 139),
+    };
+
+    private readonly bool _colourBars;
+
+    public Renderer(IntPtr hwnd, int width, int height, bool colourBars = false)
     {
         _width = width;
         _height = height;
+        _colourBars = colourBars;
 
         D3D11.D3D11CreateDevice(
             null, DriverType.Hardware, DeviceCreationFlags.BgraSupport,
@@ -115,6 +172,43 @@ internal sealed class Renderer : IDisposable
         using var backBuffer = _swapChain.GetBuffer<ID3D11Texture2D>(0);
         _rtv = _device.CreateRenderTargetView(backBuffer);
         _sprite = CreateSprite();
+        if (_colourBars) _bars = CreateColourBars();
+    }
+
+    private ID3D11Texture2D _bars;
+
+    private unsafe ID3D11Texture2D CreateColourBars()
+    {
+        var pixels = new uint[_width * _height];
+        int barWidth = Math.Max(_width / Bars.Length, 1);
+
+        for (int y = 0; y < _height; y++)
+        {
+            for (int x = 0; x < _width; x++)
+            {
+                var (_, r, g, b) = Bars[Math.Min(x / barWidth, Bars.Length - 1)];
+                // BGRA byte order, matching DXGI_FORMAT_B8G8R8A8_UNORM.
+                pixels[y * _width + x] = 0xFF000000u | ((uint)r << 16) | ((uint)g << 8) | b;
+            }
+        }
+
+        var desc = new Texture2DDescription
+        {
+            Width = (uint)_width,
+            Height = (uint)_height,
+            MipLevels = 1,
+            ArraySize = 1,
+            Format = Format.B8G8R8A8_UNorm,
+            SampleDescription = new SampleDescription(1, 0),
+            Usage = ResourceUsage.Immutable,
+            BindFlags = BindFlags.ShaderResource,
+        };
+
+        fixed (uint* p = pixels)
+        {
+            var data = new SubresourceData((IntPtr)p, (uint)(_width * sizeof(uint)));
+            return _device.CreateTexture2D(desc, [data]);
+        }
     }
 
     private const int SpriteSize = 192;
@@ -159,6 +253,16 @@ internal sealed class Renderer : IDisposable
 
     public void RenderFrame(long frame, double t)
     {
+        if (_colourBars)
+        {
+            // Static and exact: any difference after a round trip is the
+            // pipeline's doing, not the content's.
+            using var target = _swapChain.GetBuffer<ID3D11Texture2D>(0);
+            _context.CopyResource(target, _bars);
+            _swapChain.Present(1, PresentFlags.None);
+            return;
+        }
+
         // Cycling background so every captured frame is visibly different.
         var bg = new Color4(
             (float)(0.5 + 0.5 * Math.Sin(t * 1.7)),
@@ -180,6 +284,7 @@ internal sealed class Renderer : IDisposable
 
     public void Dispose()
     {
+        _bars?.Dispose();
         _sprite.Dispose();
         _rtv.Dispose();
         _swapChain.Dispose();

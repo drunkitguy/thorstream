@@ -108,6 +108,7 @@ bool Session::StartSession(const StartRequest& request, int* outWidth, int* outH
     settings.framerate = request.fps;
     settings.bitrateKbps = request.bitrateKbps;
     settings.useHevc = (request.codec == protocol::Codec::Hevc);
+    settings.fullRange = fullRange;
 
     std::string encoderError;
     encoder_ = NvencEncoder::Create(device_.device.get(), device_.context.get(), settings,

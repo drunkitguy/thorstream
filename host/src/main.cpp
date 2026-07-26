@@ -41,6 +41,7 @@ struct Options {
     bool serve = false;
     int port = protocol::kDefaultControlPort;
     bool hidden = false;
+    bool fullRange = false;
     std::wstring logPath;
 };
 
@@ -210,6 +211,8 @@ int RunGamepadSelfTest() {
 int RunServer(const Options& opts) {
     auto device = CreateGraphicsDevice();
     Session session(device);
+    session.fullRange = opts.fullRange;
+    if (opts.fullRange) wprintf(L"Encoding full-range colour.\n");
 
     // Optional: without ViGEmBus we can still stream video, just not send input.
     std::string gamepadError;
@@ -281,6 +284,8 @@ void PrintUsage() {
         L"  --fps N         cap capture rate at N fps (default: uncapped)\n"
         L"  --serve         run as a streaming server for the Thor client\n"
         L"  --port N        control port when serving (default 47810)\n"
+        L"  --full-range    encode full-range colour (better fidelity; some\n"
+        L"                  decoders ignore the flag and render it too contrasty)\n"
         L"  --hidden        detach the console window (for autostart)\n"
         L"  --log FILE      append output to FILE instead of the console\n"
         L"  --gamepad-selftest  drive the virtual pad directly, no networking\n"
@@ -339,6 +344,7 @@ int RunCapture(const WindowEntry& target, const Options& opts) {
                     settings.framerate = opts.fpsCap > 0 ? opts.fpsCap : 60;
                     settings.bitrateKbps = opts.bitrateKbps;
                     settings.useHevc = opts.hevc;
+                    settings.fullRange = opts.fullRange;
                     encoder = NvencEncoder::Create(device.device.get(), device.context.get(),
                                                    settings, &encoderError);
                     if (encoder) {
@@ -450,6 +456,7 @@ int wmain(int argc, wchar_t** argv) {
         else if (arg == L"--gamepad-selftest") return RunGamepadSelfTest();
         else if (arg == L"--encode") opts.encode = true;
         else if (arg == L"--hevc") { opts.hevc = true; opts.encode = true; }
+        else if (arg == L"--full-range") opts.fullRange = true;
         else if (arg.rfind(L"--", 0) == 0) {
             wprintf(L"Unknown option %s\n", arg.c_str());
             return kExitBadOption;

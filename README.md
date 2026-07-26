@@ -144,6 +144,33 @@ Services run in session 0, which is isolated from your desktop.
 service would start perfectly happily and capture nothing at all. A logon task
 runs in your session, which is where the windows are.
 
+## Colour
+
+The bitstream declares its colour space explicitly: **BT.709, studio range**,
+written into the VUI. That matters more than it sounds. Without it a decoder has
+to guess, and a wrong guess is subtle rather than obvious — the picture still
+appears, it is just the wrong colour. Decoding studio-range data as full range
+washes out blacks and clips highlights; decoding BT.709 as BT.601 shifts hues,
+worst in reds and greens.
+
+Measured round trip through capture, encode and decode, with no overrides:
+
+| Source | Decoded |
+|---|---|
+| white `255,255,255` | `255,255,255` |
+| black `0,0,0` | `0,0,0` |
+| skin `224,172,139` | `223,171,137` |
+
+For slightly better fidelity, run the host with `--full-range` (or
+`autostart.ps1 -Install -FullRange`). That keeps all 256 levels per channel
+instead of compressing into 16–235, which measurably improves greys and reduces
+banding in gradients. It is not the default because it depends on the client
+honouring the range flag; one that ignores it renders the picture too contrasty.
+Try it, and if anything looks crushed, drop back.
+
+Chroma is 4:2:0, which is inherent to ordinary H.264. Fine for game content;
+it is what causes slight colour fringing on thin coloured text.
+
 ## Checking it works
 
 The host prints its state on startup. A working server looks like this:

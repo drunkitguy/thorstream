@@ -19,6 +19,10 @@ struct EncoderSettings {
     // H.264 is the safest bet for decode latency on Android handhelds. HEVC
     // halves the bitrate for the same quality but costs a few ms to decode.
     bool useHevc = false;
+    // Declared in the bitstream's VUI so the decoder does not have to guess.
+    // Must match what NVENC actually produces - a wrong declaration is worse
+    // than none, because decoders trust it.
+    bool fullRange = false;
 };
 
 struct EncodedPacket {

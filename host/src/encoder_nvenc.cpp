@@ -14,6 +14,23 @@ namespace {
 using NvEncodeAPICreateInstanceFn = NVENCSTATUS(NVENCAPI*)(NV_ENCODE_API_FUNCTION_LIST*);
 using NvEncodeAPIGetMaxSupportedVersionFn = NVENCSTATUS(NVENCAPI*)(uint32_t*);
 
+// Without this the bitstream carries no colour information at all and every
+// decoder falls back to its own default. Measured: NVENC converts our BGRA input
+// using BT.709 with studio (limited) range, so that is what we declare. Getting
+// this wrong is subtle rather than obvious - the picture still appears, it is
+// just the wrong colour: full-range decoding of limited-range data washes out
+// blacks, and BT.601 decoding of BT.709 data shifts hues.
+void FillVuiParameters(NV_ENC_CONFIG_H264_VUI_PARAMETERS& vui, bool fullRange) {
+    vui.videoSignalTypePresentFlag = 1;
+    vui.videoFormat = NV_ENC_VUI_VIDEO_FORMAT_UNSPECIFIED;
+    vui.videoFullRangeFlag = fullRange ? 1 : 0;
+
+    vui.colourDescriptionPresentFlag = 1;
+    vui.colourPrimaries = NV_ENC_VUI_COLOR_PRIMARIES_BT709;
+    vui.transferCharacteristics = NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709;
+    vui.colourMatrix = NV_ENC_VUI_MATRIX_COEFFS_BT709;
+}
+
 std::string StatusText(NVENCSTATUS status) {
     switch (status) {
         case NV_ENC_SUCCESS: return "success";
@@ -155,11 +172,13 @@ std::unique_ptr<NvencEncoder> NvencEncoder::Create(ID3D11Device* device,
         hevc.idrPeriod = NVENC_INFINITE_GOPLENGTH;
         hevc.repeatSPSPPS = 1;
         hevc.outputAUD = 0;
+        FillVuiParameters(hevc.hevcVUIParameters, settings.fullRange);
     } else {
         auto& h264 = config.encodeCodecConfig.h264Config;
         h264.idrPeriod = NVENC_INFINITE_GOPLENGTH;
         h264.repeatSPSPPS = 1;  // client can join mid-stream without a side channel
         h264.outputAUD = 0;
+        FillVuiParameters(h264.h264VUIParameters, settings.fullRange);
         h264.sliceMode = 3;      // slices per frame...
         h264.sliceModeData = 1;  // ...one, so a frame is one NAL unit
     }

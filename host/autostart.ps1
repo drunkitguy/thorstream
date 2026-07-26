@@ -24,7 +24,10 @@ param(
     [Parameter(ParameterSetName = 'Install')][string]$ExePath,
     [Parameter(ParameterSetName = 'Install')][int]$Port = 47810,
     # Show the console window instead of running detached.
-    [Parameter(ParameterSetName = 'Install')][switch]$ShowWindow
+    [Parameter(ParameterSetName = 'Install')][switch]$ShowWindow,
+    # Encode full-range colour. More accurate, but a client that ignores the
+    # range flag will render it too contrasty.
+    [Parameter(ParameterSetName = 'Install')][switch]$FullRange
 )
 
 $ErrorActionPreference = 'Stop'
@@ -93,6 +96,7 @@ New-Item -ItemType Directory -Force -Path (Split-Path $logPath) | Out-Null
 
 $arguments = "--serve --port $Port --log `"$logPath`""
 if (-not $ShowWindow) { $arguments += " --hidden" }
+if ($FullRange) { $arguments += " --full-range" }
 
 $action = New-ScheduledTaskAction -Execute $exe -Argument $arguments -WorkingDirectory (Split-Path $exe)
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME

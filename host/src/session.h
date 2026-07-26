@@ -28,6 +28,10 @@ public:
     // Invoked when a session ends, so held buttons can be released.
     std::function<void()> onReleaseInput;
 
+    // Encode full-range rather than studio-range colour. More accurate, but
+    // relies on the client honouring the range flag we put in the bitstream.
+    bool fullRange = false;
+
 private:
     bool StartSession(const StartRequest& request, int* outWidth, int* outHeight,
                       std::vector<uint8_t>* outSequenceHeader, std::string* error);
