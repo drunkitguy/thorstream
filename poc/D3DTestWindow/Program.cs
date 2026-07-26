@@ -73,8 +73,10 @@ internal static class Program
 
         form.FormClosed += (_, _) =>
         {
-            Console.WriteLine($"presented {frames} frames in {life.Elapsed.TotalSeconds:F1}s " +
-                              $"({frames / life.Elapsed.TotalSeconds:F0} fps)");
+            // WinExe has no console, so record it where the test harness can read it.
+            File.AppendAllText(Path.Combine(Path.GetTempPath(), "d3dtestwindow-fps.txt"),
+                $"presented {frames} frames in {life.Elapsed.TotalSeconds:F1}s " +
+                $"({frames / life.Elapsed.TotalSeconds:F0} fps)\n");
             renderer.Dispose();
         };
 

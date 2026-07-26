@@ -33,6 +33,17 @@ GraphicsDevice CreateGraphicsDevice() {
     }
 
     const auto dxgiDevice = result.device.as<IDXGIDevice>();
+
+    // Which GPU we landed on matters enormously: capturing a window rendered on
+    // one adapter into a device on another forces cross-adapter copies, and this
+    // machine has three display adapters including a virtual one.
+    if (winrt::com_ptr<IDXGIAdapter> adapter; SUCCEEDED(dxgiDevice->GetAdapter(adapter.put()))) {
+        DXGI_ADAPTER_DESC description{};
+        if (SUCCEEDED(adapter->GetDesc(&description))) {
+            wprintf(L"Graphics device: %s (%.0f MB dedicated)\n", description.Description,
+                    static_cast<double>(description.DedicatedVideoMemory) / (1024.0 * 1024.0));
+        }
+    }
     winrt::com_ptr<::IInspectable> inspectable;
     winrt::check_hresult(CreateDirect3D11DeviceFromDXGIDevice(dxgiDevice.get(), inspectable.put()));
     result.winrtDevice =

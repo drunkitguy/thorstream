@@ -39,7 +39,6 @@ class StreamActivity : AppCompatActivity() {
     private var lastStatsFrames = 0L
     private var lastStatsBytes = 0L
 
-    private lateinit var touch: TouchController
     private var keyboardVisible = false
     private var selectHeld = false
     private var startHeld = false
@@ -56,13 +55,6 @@ class StreamActivity : AppCompatActivity() {
         binding.title.text = intent.getStringExtra(EXTRA_TITLE) ?: "streaming"
 
         gamepad = GamepadTracker { state -> control?.sendGamepad(state) }
-
-        touch = TouchController(
-            onMove = { x, y -> control?.sendMouseMove(x, y) },
-            onButton = { button, pressed -> control?.sendMouseButton(button, pressed) },
-            onScroll = { delta -> control?.sendScroll(delta) },
-        )
-        binding.surface.setOnTouchListener { view, event -> touch.onTouch(view, event) }
 
         setUpKeyboardSink()
 
