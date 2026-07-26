@@ -37,11 +37,12 @@ std::string JsonEscape(const std::string& text) {
 }
 
 void SendResponse(SOCKET socket, const char* statusLine, const char* contentType,
-                  const std::string& body) {
+                  const std::string& body, const std::string& extraHeader = {}) {
     std::ostringstream response;
     response << "HTTP/1.1 " << statusLine << "\r\n"
-             << "Content-Type: " << contentType << "\r\n"
-             << "Content-Length: " << body.size() << "\r\n"
+             << "Content-Type: " << contentType << "\r\n";
+    if (!extraHeader.empty()) response << extraHeader << "\r\n";
+    response << "Content-Length: " << body.size() << "\r\n"
              // The page polls; caching it would freeze the readout.
              << "Cache-Control: no-store\r\n"
              << "Connection: close\r\n\r\n"
@@ -188,6 +189,11 @@ constexpr char kPage[] = R"PAGE(<!doctype html>
   .art { aspect-ratio:2/3; background:#232734; display:flex; align-items:center;
          justify-content:center; position:relative; }
   .art img { width:100%; height:100%; object-fit:cover; display:block; }
+  .art.dl { cursor:pointer; }
+  .art.dl::after { content:"Download"; position:absolute; inset:auto 0 0 0; padding:7px;
+                   background:linear-gradient(transparent,#000c); color:#fff; font-size:11px;
+                   font-weight:600; text-align:center; opacity:0; transition:opacity .12s; }
+  .art.dl:hover::after, .art.dl:active::after { opacity:1; }
   .art .ph { font-size:34px; color:#3a4051; font-weight:700; }
   .badge { position:absolute; top:6px; right:6px; background:#2b6df5; color:#fff;
            font-size:10px; font-weight:600; padding:2px 6px; border-radius:20px; }
@@ -353,7 +359,8 @@ function draw() {
   const stamp = Date.now();
   document.getElementById("grid").innerHTML = games.map(g => `
     <div class="tile">
-      <div class="art">
+      <div class="art${g.hasArt ? " dl" : ""}"
+           ${g.hasArt ? `onclick="download('${g.id}')" title="Download the artwork file"` : ``}>
         ${g.hasArt
           ? `<img loading="lazy" src="cover?id=${encodeURIComponent(g.id)}&v=${stamp}" alt="">`
           : `<span class="ph">${escapeHtml((g.name[0] || "?").toUpperCase())}</span>`}
@@ -365,6 +372,12 @@ function draw() {
         ${g.hasOverride ? `<button class="danger" onclick="clearArt('${g.id}')">Reset</button>` : ``}
       </div>
     </div>`).join("");
+}
+
+// Navigating to the URL lets the Content-Disposition header name the file,
+// which an anchor with a download attribute would override with our own guess.
+function download(id) {
+  window.location = "art?id=" + encodeURIComponent(id);
 }
 
 const picker = document.getElementById("picker");
@@ -543,6 +556,27 @@ void WebConsole::HandleConnection(uintptr_t socketHandle) {
             // The grid draws its own placeholder for these, so a 404 is the
             // expected answer for a game with no art rather than an error.
             SendResponse(socket, "404 Not Found", "text/plain", "no cover\n");
+        }
+        return;
+    }
+
+    if (method == "GET" && target == "art") {
+        std::vector<uint8_t> bytes;
+        std::string filename;
+        std::string contentType;
+        if (artFile && artFile(id, &bytes, &filename, &contentType) && !bytes.empty()) {
+            // The filename lands in a response header, so anything that could
+            // terminate one early is stripped rather than quoted.
+            std::string safe;
+            for (const char c : filename) {
+                if (c == '"' || c == '\r' || c == '\n' || c == '\\') continue;
+                safe += c;
+            }
+            SendResponse(socket, "200 OK", contentType.c_str(),
+                         std::string(bytes.begin(), bytes.end()),
+                         "Content-Disposition: attachment; filename=\"" + safe + "\"");
+        } else {
+            SendResponse(socket, "404 Not Found", "text/plain", "no artwork to download\n");
         }
         return;
     }

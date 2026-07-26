@@ -65,6 +65,13 @@ public:
         setCover;
     std::function<bool(const std::string& id)> clearCover;
 
+    // The artwork as a downloadable file: the original image where it can be
+    // read, rather than the thumbnail the handheld gets. `filename` is the name
+    // suggested to the browser and is sanitised by the implementation.
+    std::function<bool(const std::string& id, std::vector<uint8_t>* bytes, std::string* filename,
+                       std::string* contentType)>
+        artFile;
+
     bool Start(uint16_t port, std::string* error);
     void Stop();
 

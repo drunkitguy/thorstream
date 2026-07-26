@@ -10,11 +10,14 @@
 #include <io.h>
 #include <share.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -139,6 +142,48 @@ bool RedirectOutputToLog(const std::wstring& path) {
     // handle afterwards was tried and silently produced an empty log, which is a
     // far worse failure than having to stop the host to read it.
     return true;
+}
+
+// Determined by content rather than by any name, because the stored override
+// keeps a single extension regardless of what was uploaded and Playnite's paths
+// are not always honest either.
+std::string SniffImageType(const std::vector<uint8_t>& bytes) {
+    const auto starts = [&](std::initializer_list<uint8_t> magic) {
+        if (bytes.size() < magic.size()) return false;
+        return std::equal(magic.begin(), magic.end(), bytes.begin());
+    };
+    if (starts({0xFF, 0xD8, 0xFF})) return "image/jpeg";
+    if (starts({0x89, 0x50, 0x4E, 0x47})) return "image/png";
+    if (starts({0x47, 0x49, 0x46, 0x38})) return "image/gif";
+    if (starts({0x42, 0x4D})) return "image/bmp";
+    if (bytes.size() > 12 && starts({0x52, 0x49, 0x46, 0x46}) &&
+        std::equal(bytes.begin() + 8, bytes.begin() + 12, "WEBP")) {
+        return "image/webp";
+    }
+    return "application/octet-stream";
+}
+
+const char* ExtensionFor(const std::string& contentType) {
+    if (contentType == "image/jpeg") return ".jpg";
+    if (contentType == "image/png") return ".png";
+    if (contentType == "image/gif") return ".gif";
+    if (contentType == "image/bmp") return ".bmp";
+    if (contentType == "image/webp") return ".webp";
+    return ".img";
+}
+
+// Game names contain colons, slashes and trademark symbols; none of those may
+// reach a download filename.
+std::string SanitiseFilename(const std::string& name) {
+    std::string out;
+    for (const char c : name) {
+        const bool keep = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                          (c >= '0' && c <= '9') || c == ' ' || c == '-' || c == '_' || c == '.';
+        out += keep ? c : '_';
+        if (out.size() >= 80) break;
+    }
+    while (!out.empty() && (out.back() == ' ' || out.back() == '.')) out.pop_back();
+    return out.empty() ? "artwork" : out;
 }
 
 // So the user knows what address to type into the handheld.
@@ -739,6 +784,33 @@ int RunServer(const Options& opts) {
         return true;
     };
     console.clearCover = [](const std::string& id) { return CoverStore::Remove(id); };
+    console.artFile = [library](const std::string& id, std::vector<uint8_t>* bytes,
+                                std::string* filename, std::string* contentType) {
+        std::wstring source = CoverStore::Find(id);
+        std::string name = "artwork";
+        for (const auto& game : library(false)) {
+            if (game.id != id) continue;
+            if (!game.name.empty()) name = game.name;
+            if (source.empty()) source = game.coverPath;
+            break;
+        }
+        if (source.empty()) return false;
+
+        // The original file, so a download is the best copy that exists rather
+        // than the downscaled one the handheld is sent.
+        if (std::ifstream file(source, std::ios::binary); file) {
+            bytes->assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+        }
+        // Falling back to the generated thumbnail keeps the button working for
+        // art whose source file has since moved or been deleted.
+        if (bytes->empty() && !CoverArt::LoadThumbnail(source, protocol::kCoverWidth, bytes)) {
+            return false;
+        }
+
+        *contentType = SniffImageType(*bytes);
+        *filename = SanitiseFilename(name) + ExtensionFor(*contentType);
+        return true;
+    };
 
     console.onStart = [&](std::string* error) { return startService(error); };
     console.onStop = [&] { stopService(); };
