@@ -64,9 +64,16 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+
+      # The tag files are one per game and useless individually, so they ship as
+      # a single archive to unpack onto the handheld.
+      - name: Package the Cocoon tag files
+        run: zip -j -r thorstream-cocoon-tags.zip cocoon/thorstream
 
       - name: Attach artifacts to the release
         uses: softprops/action-gh-release@v2
@@ -74,4 +81,7 @@ jobs:
           files: |
             artifacts/thorstream-client-debug/*.apk
             artifacts/thorstream-host/*
+            cocoon/thorstream.json
+            cocoon/README.md
+            thorstream-cocoon-tags.zip
           generate_release_notes: true
