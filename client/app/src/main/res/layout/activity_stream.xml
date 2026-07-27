@@ -45,4 +45,83 @@
         android:textColor="#FFFFFF"
         android:textSize="11sp" />
 
+    <!-- Last child, so it covers the corner labels and - being opaque - is
+         subtracted from the SurfaceView's transparent region, hiding the black
+         hole punched for the video until a frame has actually been decoded. -->
+    <LinearLayout
+        android:id="@+id/loadingOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#0B0E13"
+        android:focusable="false"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:paddingStart="64dp"
+        android:paddingEnd="64dp">
+
+        <TextView
+            android:id="@+id/loadingTitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:ellipsize="end"
+            android:gravity="center"
+            android:maxLines="2"
+            android:textColor="#FFFFFF"
+            android:textSize="28sp"
+            android:textStyle="bold" />
+
+        <ProgressBar
+            android:id="@+id/loadingBar"
+            style="?android:attr/progressBarStyleHorizontal"
+            android:layout_width="match_parent"
+            android:layout_height="10dp"
+            android:layout_marginTop="28dp"
+            android:indeterminate="false"
+            android:max="1000"
+            android:maxHeight="10dp"
+            android:minHeight="10dp"
+            android:progressDrawable="@drawable/loading_progress" />
+
+        <TextView
+            android:id="@+id/loadingStage"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="22dp"
+            android:gravity="center"
+            android:textColor="#DCE3ED"
+            android:textSize="18sp" />
+
+        <TextView
+            android:id="@+id/loadingDetail"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:gravity="center"
+            android:textColor="#8A93A0"
+            android:textSize="14sp" />
+
+        <TextView
+            android:id="@+id/loadingError"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:gravity="center"
+            android:textColor="#FF8A80"
+            android:textSize="16sp"
+            android:visibility="gone" />
+
+        <!-- Always shown: leaving is available for the whole wait, not only
+             after something has visibly gone wrong. -->
+        <TextView
+            android:id="@+id/loadingHint"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="28dp"
+            android:gravity="center"
+            android:text="@string/loading_cancel_hint"
+            android:textColor="#6C7583"
+            android:textSize="14sp" />
+
+    </LinearLayout>
+
 </FrameLayout>

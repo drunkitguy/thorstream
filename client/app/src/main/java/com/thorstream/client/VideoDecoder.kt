@@ -29,6 +29,9 @@ class VideoDecoder(private val surface: Surface) {
     @Volatile
     private var sawKeyframe = false
 
+    @Volatile
+    private var renderedFrame = false
+
     var framesDecoded = 0L
         private set
 
@@ -36,6 +39,16 @@ class VideoDecoder(private val surface: Surface) {
         private set
 
     val hasKeyframe: Boolean get() = sawKeyframe
+
+    /**
+     * True once a decoded picture has been handed to the surface.
+     *
+     * [hasKeyframe] is not the same thing: it is set when a keyframe is accepted
+     * for queueing, and that frame can still be dropped before it reaches the
+     * codec. Only this says something was actually put on screen, which is what
+     * anyone waiting for the black screen to end cares about.
+     */
+    val hasRenderedFrame: Boolean get() = renderedFrame
 
     fun start(session: SessionInfo) {
         val mime = if (session.codec == Protocol.CODEC_HEVC) {
@@ -72,6 +85,7 @@ class VideoDecoder(private val surface: Surface) {
                 // `true` renders to the surface immediately - no scheduling delay.
                 try {
                     mc.releaseOutputBuffer(index, true)
+                    renderedFrame = true
                 } catch (e: IllegalStateException) {
                     Log.w(TAG, "releaseOutputBuffer after stop", e)
                 }
@@ -87,8 +101,16 @@ class VideoDecoder(private val surface: Surface) {
             }
         })
 
-        decoder.configure(format, surface, null, 0)
-        decoder.start()
+        try {
+            decoder.configure(format, surface, null, 0)
+            decoder.start()
+        } catch (e: Exception) {
+            // codec is only assigned once both of these succeed, so stop() could
+            // never reach this instance to release it - an unsupported format
+            // would leak a hardware codec on every retry.
+            decoder.release()
+            throw e
+        }
         codec = decoder
         running = true
         Log.i(TAG, "decoder started: $mime ${session.width}x${session.height}")

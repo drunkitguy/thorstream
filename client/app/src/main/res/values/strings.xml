@@ -20,4 +20,8 @@
     <string name="cover_description">Game cover</string>
     <string name="pick_pc">Choose your PC</string>
     <string name="status_idle">Enter your PC\'s address and connect.</string>
+    <!-- Deliberately not "cancel": the host runs a launch to completion and
+         cannot act on a stop until it finishes, so leaving this screen is all
+         this really does. -->
+    <string name="loading_cancel_hint">Press B or Back to leave this screen.\nThe game carries on launching on the PC.</string>
 </resources>

@@ -115,6 +115,37 @@ class ControlConnection(private val scope: CoroutineScope) {
 
     fun stopSession() = send(Protocol.STOP, ProtocolWriter())
 
+    /**
+     * Sends STOP and closes, on a thread that belongs to no lifecycle.
+     *
+     * Every other send is dispatched on the caller's scope, which for the stream
+     * screen is cancelled as the activity is destroyed - so a STOP queued there
+     * never runs, and [close] would shut the socket underneath it in any case
+     * since it does not wait. This is the one message that has to outlive its
+     * sender: without it the host goes on encoding for a client that has left.
+     */
+    fun stopSessionAndClose() {
+        val s = socket ?: return close()
+        connected = false
+        readJob?.cancel()
+        socket = null
+        val frame = frameFor(Protocol.STOP, ProtocolWriter())
+        Thread {
+            try {
+                s.getOutputStream().apply {
+                    write(frame)
+                    flush()
+                }
+            } catch (e: IOException) {
+                Log.w(TAG, "STOP not delivered", e)
+            }
+            try {
+                s.close()
+            } catch (_: IOException) {
+            }
+        }.start()
+    }
+
     fun sendGamepad(state: GamepadState) {
         send(
             Protocol.GAMEPAD,
@@ -142,18 +173,23 @@ class ControlConnection(private val scope: CoroutineScope) {
         socket = null
     }
 
-    private fun send(type: Byte, payload: ProtocolWriter) {
-        if (!connected) return
+    private fun frameFor(type: Byte, payload: ProtocolWriter): ByteArray {
         val body = payload.toByteArray()
         val frame = ByteBuffer.allocate(4 + 1 + body.size).order(ByteOrder.LITTLE_ENDIAN)
         frame.putInt(body.size + 1)
         frame.put(type)
         frame.put(body)
+        return frame.array()
+    }
+
+    private fun send(type: Byte, payload: ProtocolWriter) {
+        if (!connected) return
+        val frame = frameFor(type, payload)
 
         scope.launch(Dispatchers.IO) {
             try {
                 socket?.getOutputStream()?.apply {
-                    write(frame.array())
+                    write(frame)
                     flush()
                 }
             } catch (e: IOException) {
