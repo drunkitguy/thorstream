@@ -82,6 +82,76 @@ bool DisplayTopology::Attach(const std::wstring& deviceName, int width, int heig
     return true;
 }
 
+bool DisplayTopology::MakePrimary(const std::wstring& deviceName, std::string* error) {
+    const auto displays = Snapshot();
+
+    const SavedDisplay* target = nullptr;
+    for (const auto& display : displays) {
+        if (display.deviceName == deviceName) target = &display;
+    }
+    if (!target) {
+        if (error) *error = "the display to make primary is not attached";
+        return false;
+    }
+
+    // Windows defines the primary display as the one whose top-left corner is
+    // the origin, so this is a translation of the whole arrangement rather than
+    // a property of one display. CDS_SET_PRIMARY on a display that is not being
+    // moved to (0,0) is quietly ignored.
+    const LONG shiftX = -target->mode.dmPosition.x;
+    const LONG shiftY = -target->mode.dmPosition.y;
+
+    for (const auto& display : displays) {
+        DEVMODEW mode = display.mode;
+        mode.dmSize = sizeof(mode);
+        mode.dmPosition.x += shiftX;
+        mode.dmPosition.y += shiftY;
+        mode.dmFields |= DM_POSITION;
+
+        DWORD flags = CDS_UPDATEREGISTRY | CDS_NORESET;
+        if (display.deviceName == deviceName) flags |= CDS_SET_PRIMARY;
+
+        const LONG staged =
+            ChangeDisplaySettingsExW(display.deviceName.c_str(), &mode, nullptr, flags, nullptr);
+        if (staged != DISP_CHANGE_SUCCESSFUL) {
+            // Every display is staged with CDS_NORESET and committed by a single
+            // apply below, so carrying on would commit a half-shifted desktop -
+            // some displays moved, this one left behind, overlapping. Nothing has
+            // been applied yet, so give up here and let the caller restore, which
+            // re-stages the whole snapshot and applies that instead.
+            wprintf(L"Could not stage the new position for %s (code %ld)\n",
+                    display.deviceName.c_str(), staged);
+            if (error) *error = "a display refused to be repositioned (code " +
+                                std::to_string(staged) + ")";
+            return false;
+        }
+    }
+
+    const LONG applied = ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr);
+    if (applied != DISP_CHANGE_SUCCESSFUL) {
+        if (error) *error = "making the virtual display primary was rejected (code " +
+                            std::to_string(applied) + ")";
+        return false;
+    }
+
+    // Verify rather than trust: a game that ends up on the wrong display is the
+    // whole failure this exists to prevent.
+    for (const auto& display : Snapshot()) {
+        if (display.deviceName == deviceName && display.primary) return true;
+    }
+    if (error) *error = "Windows did not make the virtual display primary";
+    return false;
+}
+
+bool DisplayTopology::CurrentMode(const std::wstring& deviceName, int* width, int* height) {
+    DEVMODEW mode{};
+    mode.dmSize = sizeof(mode);
+    if (!EnumDisplaySettingsExW(deviceName.c_str(), ENUM_CURRENT_SETTINGS, &mode, 0)) return false;
+    if (width) *width = static_cast<int>(mode.dmPelsWidth);
+    if (height) *height = static_cast<int>(mode.dmPelsHeight);
+    return true;
+}
+
 bool DisplayTopology::KeepOnly(const std::wstring& keepDeviceName, std::string* error) {
     if (keepDeviceName.empty()) {
         if (error) *error = "no display to keep";

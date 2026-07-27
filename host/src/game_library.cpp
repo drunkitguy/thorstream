@@ -168,11 +168,14 @@ bool GameLibrary::Launch(const std::string& gameId, std::string* error) {
 }
 
 HWND GameLibrary::WaitForNewGameWindow(FILETIME since, int timeoutSeconds,
-                                       const std::vector<HWND>& ignore) {
+                                       const std::vector<HWND>& ignore,
+                                       const std::function<bool()>& abandon) {
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds(timeoutSeconds);
 
     while (std::chrono::steady_clock::now() < deadline) {
+        if (abandon && abandon()) return nullptr;
+
         for (const auto& window : EnumerateCapturableWindows()) {
             if (std::find(ignore.begin(), ignore.end(), window.hwnd) != ignore.end()) continue;
 

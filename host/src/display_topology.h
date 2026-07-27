@@ -33,8 +33,17 @@ public:
     static bool Attach(const std::wstring& deviceName, int width, int height, int refreshRate,
                        std::string* error);
 
+    // Moves the origin onto `deviceName`, which is what "primary" means to
+    // Windows and to a game choosing a display. Every other display is shifted
+    // by the same offset, so the arrangement is preserved.
+    static bool MakePrimary(const std::wstring& deviceName, std::string* error);
+
     // Leaves only `keepDeviceName` attached, and makes it primary.
     static bool KeepOnly(const std::wstring& keepDeviceName, std::string* error);
+
+    // The mode a display is actually in. Both Attach and KeepOnly let Windows
+    // pick a mode, so the size asked for is not necessarily the size in use.
+    static bool CurrentMode(const std::wstring& deviceName, int* width, int* height);
 
     static bool Restore(const std::vector<SavedDisplay>& snapshot);
 

@@ -2,6 +2,7 @@
 
 #include <Windows.h>
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -35,8 +36,15 @@ public:
 
     // Waits for a window belonging to a process that started after `since`.
     // Games take a long time to show anything, hence the generous timeout.
+    //
+    // The wait blocks the thread that started the launch, so it takes an
+    // optional predicate that another thread can make true to abandon it: an
+    // already-running game never starts a new process, and waiting the full
+    // timeout for that would make the host deaf to a stop or a shutdown for
+    // minutes. Polled once per second-ish, so it must be cheap and thread-safe.
     static HWND WaitForNewGameWindow(FILETIME since, int timeoutSeconds,
-                                     const std::vector<HWND>& ignore);
+                                     const std::vector<HWND>& ignore,
+                                     const std::function<bool()>& abandon = {});
 };
 
 }  // namespace thorstream
