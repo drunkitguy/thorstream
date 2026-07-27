@@ -31,6 +31,180 @@ void FillVuiParameters(NV_ENC_CONFIG_H264_VUI_PARAMETERS& vui, bool fullRange) {
     vui.colourMatrix = NV_ENC_VUI_MATRIX_COEFFS_BT709;
 }
 
+const char* CodecName(VideoCodec codec) {
+    switch (codec) {
+        case VideoCodec::Hevc: return "HEVC";
+        case VideoCodec::Av1: return "AV1";
+        default: return "H.264";
+    }
+}
+
+GUID CodecGuid(VideoCodec codec) {
+    switch (codec) {
+        case VideoCodec::Hevc: return NV_ENC_CODEC_HEVC_GUID;
+        case VideoCodec::Av1: return NV_ENC_CODEC_AV1_GUID;
+        default: return NV_ENC_CODEC_H264_GUID;
+    }
+}
+
+// Unknown is a distinct answer on purpose. "The driver would not tell us" must
+// never be read as "unsupported": that would turn a driver quirk into a hard
+// failure of H.264, the codec every other path falls back to. On Unknown we
+// carry on and let initialization report whatever it reports, which is exactly
+// how this code behaved before the gate existed.
+enum class CodecSupport { Yes, No, Unknown };
+
+// AV1 encode only exists on Ada and newer, so a Turing or Ampere card will
+// happily open a session and then fail somewhere deep inside initialization with
+// a generic error. Ask the driver what it can actually encode first - this is
+// the documented way to validate an encodeGUID before using it.
+CodecSupport QueryCodecSupport(const NV_ENCODE_API_FUNCTION_LIST& api, void* encoder,
+                               const GUID& codec) {
+    if (!api.nvEncGetEncodeGUIDCount || !api.nvEncGetEncodeGUIDs) return CodecSupport::Unknown;
+
+    // The cap is not paranoia about NVIDIA: it is that `count` sizes an
+    // allocation, and a garbage value from a broken or shimmed driver would
+    // throw bad_alloc out of a function nothing above here catches, taking the
+    // host down. NVENC has under a dozen codecs; 64 is room for decades.
+    constexpr uint32_t kMaxPlausibleCodecs = 64;
+    uint32_t count = 0;
+    if (api.nvEncGetEncodeGUIDCount(encoder, &count) != NV_ENC_SUCCESS || count == 0 ||
+        count > kMaxPlausibleCodecs) {
+        return CodecSupport::Unknown;
+    }
+
+    std::vector<GUID> guids(count);
+    uint32_t returned = 0;
+    if (api.nvEncGetEncodeGUIDs(encoder, guids.data(), count, &returned) != NV_ENC_SUCCESS ||
+        returned == 0) {
+        return CodecSupport::Unknown;
+    }
+    guids.resize((std::min)(returned, count));
+
+    const bool found = std::any_of(guids.begin(), guids.end(), [&](const GUID& g) {
+        return memcmp(&g, &codec, sizeof(GUID)) == 0;
+    });
+    return found ? CodecSupport::Yes : CodecSupport::No;
+}
+
+// Big-endian bit reader over an AV1 OBU payload. Returns zeros and latches
+// !Ok() once it runs off the end, so callers can parse straight through and
+// check validity once at the bottom.
+class BitReader {
+public:
+    BitReader(const uint8_t* data, size_t size) : data_(data), size_(size) {}
+
+    uint32_t Bits(int count) {
+        uint32_t value = 0;
+        for (int i = 0; i < count; ++i) {
+            const size_t byte = position_ >> 3;
+            if (byte >= size_) {
+                ok_ = false;
+                return 0;
+            }
+            value = (value << 1) | ((data_[byte] >> (7 - (position_ & 7))) & 1u);
+            ++position_;
+        }
+        return value;
+    }
+
+    bool Ok() const { return ok_; }
+
+private:
+    const uint8_t* data_;
+    size_t size_;
+    size_t position_ = 0;
+    bool ok_ = true;
+};
+
+// Walks the low-overhead OBU stream for OBU_SEQUENCE_HEADER. Written as a scan
+// rather than "it is the first OBU" because whether NVENC prepends a temporal
+// delimiter is not something the header promises either way.
+const uint8_t* FindSequenceHeaderObu(const std::vector<uint8_t>& stream, size_t* payloadSize) {
+    constexpr uint32_t kObuSequenceHeader = 1;
+
+    size_t offset = 0;
+    while (offset < stream.size()) {
+        const uint8_t obuHeader = stream[offset];
+        const uint32_t type = (obuHeader >> 3) & 0x0Fu;
+        const bool hasExtension = ((obuHeader >> 2) & 1u) != 0;
+        const bool hasSizeField = ((obuHeader >> 1) & 1u) != 0;
+
+        size_t cursor = offset + 1 + (hasExtension ? 1 : 0);
+        if (cursor > stream.size()) return nullptr;
+
+        size_t size = 0;
+        if (hasSizeField) {
+            // leb128, capped at the eight bytes the spec allows.
+            bool complete = false;
+            for (int i = 0; i < 8 && cursor < stream.size(); ++i) {
+                const uint8_t byte = stream[cursor++];
+                size |= static_cast<size_t>(byte & 0x7Fu) << (i * 7);
+                if ((byte & 0x80u) == 0) {
+                    complete = true;
+                    break;
+                }
+            }
+            if (!complete) return nullptr;
+        } else {
+            // Without a size field an OBU runs to the end of the buffer, so it
+            // can only ever be the last one.
+            size = stream.size() - cursor;
+        }
+        if (size > stream.size() - cursor) return nullptr;
+
+        if (type == kObuSequenceHeader) {
+            *payloadSize = size;
+            return stream.data() + cursor;
+        }
+        offset = cursor + size;
+    }
+    return nullptr;
+}
+
+// NVENC picks the AV1 level and tier from the bitrate, not from anything we ask
+// for: at 1080p it emits Main tier up to ~12 Mbps and High tier from ~20 Mbps
+// up. High tier is decoded by noticeably fewer Android SoCs than Main, and a
+// handheld that cannot decode it shows a black screen and nothing else - so read
+// the choice back out and give the log something to be diagnosed from.
+std::string DescribeAv1Bitstream(const std::vector<uint8_t>& sequenceHeader) {
+    size_t payloadSize = 0;
+    const uint8_t* payload = FindSequenceHeaderObu(sequenceHeader, &payloadSize);
+    if (!payload) return {};
+
+    BitReader bits(payload, payloadSize);
+    const uint32_t profile = bits.Bits(3);
+    bits.Bits(1);  // still_picture
+    const uint32_t reducedStillPictureHeader = bits.Bits(1);
+
+    uint32_t levelIdx = 0;
+    uint32_t tier = 0;
+    if (reducedStillPictureHeader) {
+        levelIdx = bits.Bits(5);  // seq_tier[0] is 0 by definition here
+    } else {
+        // We set enableTimingInfo = 0, so this flag is 0 and decoder_model_info
+        // is absent. If that ever changes, timing_info() sits between here and
+        // the level, and giving up beats printing a misparsed one.
+        if (bits.Bits(1) != 0) return {};
+        bits.Bits(1);   // initial_display_delay_present_flag
+        bits.Bits(5);   // operating_points_cnt_minus_1 - only point 0 is described
+        bits.Bits(12);  // operating_point_idc[0]
+        levelIdx = bits.Bits(5);
+        if (levelIdx > 7) tier = bits.Bits(1);
+    }
+    if (!bits.Ok()) return {};
+
+    // seq_level_idx packs major and minor: index 0 is level 2.0 and each step is
+    // a tenth, so index 9 is level 4.1.
+    char text[160];
+    snprintf(text, sizeof(text), "av01.%u.%02u%c (level %u.%u, %s tier)%s", profile, levelIdx,
+             tier ? 'H' : 'M', 2 + (levelIdx >> 2), levelIdx & 3u, tier ? "High" : "Main",
+             tier ? " - High tier AV1 is not decodable on every Android SoC; lower the"
+                    " bitrate if the handheld shows a black screen"
+                  : "");
+    return text;
+}
+
 std::string StatusText(NVENCSTATUS status) {
     switch (status) {
         case NV_ENC_SUCCESS: return "success";
@@ -136,7 +310,18 @@ std::unique_ptr<NvencEncoder> NvencEncoder::Create(ID3D11Device* device,
         return fail("nvEncOpenEncodeSessionEx: " + StatusText(status));
     }
 
-    const GUID codec = settings.useHevc ? NV_ENC_CODEC_HEVC_GUID : NV_ENC_CODEC_H264_GUID;
+    const GUID codec = CodecGuid(settings.codec);
+    if (QueryCodecSupport(impl.api, impl.encoder, codec) == CodecSupport::No) {
+        // The codec is named explicitly because the client shows this string
+        // verbatim, and "unsupported parameter" from three calls later would tell
+        // the user nothing about which knob to turn.
+        std::string message = std::string("this GPU cannot encode ") + CodecName(settings.codec);
+        if (settings.codec == VideoCodec::Av1) {
+            message += " - NVENC AV1 encode needs an Ada-generation card (RTX 40 series) or newer";
+        }
+        return fail(message + "; pick a different codec");
+    }
+
     // P1 is the fastest preset; combined with the ultra-low-latency tuning this is
     // the configuration Moonlight-style streaming wants.
     const GUID preset = NV_ENC_PRESET_P1_GUID;
@@ -167,7 +352,35 @@ std::unique_ptr<NvencEncoder> NvencEncoder::Create(ID3D11Device* device,
     config.rcParams.vbvInitialDelay = config.rcParams.vbvBufferSize;
     config.rcParams.enableAQ = 1;
 
-    if (settings.useHevc) {
+    if (settings.codec == VideoCodec::Av1) {
+        auto& av1 = config.encodeCodecConfig.av1Config;
+        av1.idrPeriod = NVENC_INFINITE_GOPLENGTH;
+        av1.disableSeqHdr = 0;
+        // AV1's equivalent of repeatSPSPPS: put the sequence header OBU in front
+        // of every key frame so a client can join mid-stream without a side
+        // channel, and so a lost STARTED header is not fatal.
+        av1.repeatSeqHdr = 1;
+        // Low-overhead OBU stream (each OBU carries obu_size) rather than the
+        // length-delimited Annex B form. This is what Android's MediaCodec feeds
+        // its AV1 decoder, and what ffmpeg's "obu" demuxer reads.
+        av1.outputAnnexBFormat = 0;
+        av1.chromaFormatIDC = 1;  // 4:2:0; NVENC has no 4:4:4 AV1 encode
+        // Timing info and decoder model would only add bytes to a stream whose
+        // pacing is already carried by our own packet timestamps.
+        av1.enableTimingInfo = 0;
+        av1.enableDecoderModelInfo = 0;
+
+        // AV1 signals colour in the sequence header itself rather than in a VUI
+        // block, so FillVuiParameters does not apply - but the values must agree
+        // with it exactly, or the same codec-dependent colour shift that already
+        // cost us a debugging round comes back on AV1 only.
+        av1.colorPrimaries = NV_ENC_VUI_COLOR_PRIMARIES_BT709;
+        av1.transferCharacteristics = NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709;
+        av1.matrixCoefficients = NV_ENC_VUI_MATRIX_COEFFS_BT709;
+        av1.colorRange = settings.fullRange ? 1 : 0;
+        // There is no AV1 counterpart to H.264's sliceMode=3: an AV1 frame is
+        // already a single temporal unit, so nothing needs splitting.
+    } else if (settings.codec == VideoCodec::Hevc) {
         auto& hevc = config.encodeCodecConfig.hevcConfig;
         hevc.idrPeriod = NVENC_INFINITE_GOPLENGTH;
         hevc.repeatSPSPPS = 1;
@@ -247,7 +460,10 @@ std::unique_ptr<NvencEncoder> NvencEncoder::Create(ID3D11Device* device,
     impl.bitstream = bitstream.bitstreamBuffer;
 
     // Pull the sequence header out up front so clients can be configured before
-    // the first packet arrives.
+    // the first packet arrives. What comes back is codec-shaped: Annex-B SPS/PPS
+    // for H.264, VPS/SPS/PPS for HEVC, and for AV1 an OBU_SEQUENCE_HEADER in the
+    // same low-overhead form the bitstream uses - deliberately not wrapped in an
+    // AV1CodecConfigurationRecord. See NvencEncoder::SequenceHeader().
     uint8_t headerBuffer[1024] = {};
     uint32_t headerSize = 0;
     NV_ENC_SEQUENCE_PARAM_PAYLOAD payload{};
@@ -257,6 +473,9 @@ std::unique_ptr<NvencEncoder> NvencEncoder::Create(ID3D11Device* device,
     payload.outSPSPPSPayloadSize = &headerSize;
     if (impl.api.nvEncGetSequenceParams(impl.encoder, &payload) == NV_ENC_SUCCESS) {
         self->sequenceHeader_.assign(headerBuffer, headerBuffer + headerSize);
+        if (settings.codec == VideoCodec::Av1) {
+            self->bitstreamDescription_ = DescribeAv1Bitstream(self->sequenceHeader_);
+        }
     }
 
     return self;
@@ -332,7 +551,13 @@ bool NvencEncoder::RepeatLastFrame(uint64_t timestamp, const PacketCallback& onP
     pic.pictureStruct = NV_ENC_PIC_STRUCT_FRAME;
     pic.inputTimeStamp = timestamp;
     if (forceIdr_) {
-        pic.encodePicFlags = NV_ENC_PIC_FLAG_FORCEIDR | NV_ENC_PIC_FLAG_OUTPUT_SPSPPS;
+        pic.encodePicFlags = NV_ENC_PIC_FLAG_FORCEIDR;
+        // OUTPUT_SPSPPS is an H.264/HEVC notion; AV1 has no parameter sets and
+        // repeatSeqHdr already emits the sequence header OBU ahead of every key
+        // frame, so asking for it here would be at best redundant.
+        if (settings_.codec != VideoCodec::Av1) {
+            pic.encodePicFlags |= NV_ENC_PIC_FLAG_OUTPUT_SPSPPS;
+        }
     }
 
     const NVENCSTATUS status = impl.api.nvEncEncodePicture(impl.encoder, &pic);

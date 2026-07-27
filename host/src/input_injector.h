@@ -21,6 +21,17 @@ public:
     enum class MouseButton : uint8_t { Left = 0, Right = 1, Middle = 2 };
     static void MouseButtonEvent(MouseButton button, bool pressed);
 
+    // Lifts whatever MouseButtonEvent still has held down. Nothing else can: by
+    // the time a client is gone the socket that would have carried the matching
+    // button-up is gone with it, and a button left down outlives the session, the
+    // disconnect and the host process - it stays held until the user physically
+    // clicks. Call this whenever a client goes away for any reason.
+    //
+    // Which buttons are held is tracked rather than assumed: synthesising three
+    // button-ups unconditionally would deliver phantom clicks to whatever the
+    // user has under the pointer, which is a worse bug than the one being fixed.
+    static void ReleaseHeldButtons();
+
     // Positive scrolls up, in WHEEL_DELTA units.
     static void Scroll(int16_t delta);
 

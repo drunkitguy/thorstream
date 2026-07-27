@@ -331,7 +331,14 @@ bool Session::StartSession(const StartRequest& request, int* outWidth, int* outH
     settings.height = height;
     settings.framerate = request.fps;
     settings.bitrateKbps = request.bitrateKbps;
-    settings.useHevc = (request.codec == protocol::Codec::Hevc);
+    // StreamServer rejects unknown codec bytes before they get this far, so the
+    // default arm only fires if an enumerator is added above without being added
+    // here - it is a compile-time oversight guard, not a runtime fallback.
+    switch (request.codec) {
+        case protocol::Codec::Hevc: settings.codec = VideoCodec::Hevc; break;
+        case protocol::Codec::Av1: settings.codec = VideoCodec::Av1; break;
+        default: settings.codec = VideoCodec::H264; break;
+    }
     settings.fullRange = fullRange;
 
     std::string encoderError;
@@ -342,6 +349,13 @@ bool Session::StartSession(const StartRequest& request, int* outWidth, int* outH
         RestoreDisplays();
         *error = "NVENC: " + encoderError;
         return false;
+    }
+
+    // Only AV1 fills this in, and only because its level and tier are picked by
+    // the encoder from the bitrate. If the handheld ever comes up black, this
+    // line is what says whether it was handed something it cannot decode.
+    if (!encoder_->BitstreamDescription().empty()) {
+        wprintf(L"encoder bitstream: %hs\n", encoder_->BitstreamDescription().c_str());
     }
 
     framesSent_ = 0;

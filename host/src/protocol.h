@@ -52,7 +52,18 @@ enum class MessageType : uint8_t {
 // 1080p handheld, small enough that a whole library is a few megabytes.
 inline constexpr int kCoverWidth = 342;
 
-enum class Codec : uint8_t { H264 = 0, Hevc = 1 };
+// Wire values are permanent: shipping clients already send 0 for H.264, so new
+// codecs are only ever appended.
+enum class Codec : uint8_t { H264 = 0, Hevc = 1, Av1 = 2 };
+
+// A codec byte off the wire comes from a client we did not write and may be
+// newer than us, so it has to be checked before it is cast. Quietly treating an
+// unrecognised value as H.264 would leave the client configuring a decoder for
+// the codec it asked for while receiving a different one - a black screen whose
+// cause is invisible from both ends.
+inline bool IsKnownCodec(uint8_t value) {
+    return value <= static_cast<uint8_t>(Codec::Av1);
+}
 
 #pragma pack(push, 1)
 struct VideoFragmentHeader {

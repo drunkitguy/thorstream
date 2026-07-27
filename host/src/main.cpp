@@ -29,6 +29,7 @@
 #include "game_library.h"
 #include "encoder_nvenc.h"
 #include "gamepad_vigem.h"
+#include "input_injector.h"
 #include "save_png.h"
 #include <shlobj.h>  // IsUserAnAdmin
 
@@ -50,7 +51,7 @@ struct Options {
     std::wstring filter;
     int seconds = 10;
     bool encode = false;
-    bool hevc = false;
+    VideoCodec codec = VideoCodec::H264;
     int bitrateKbps = 20000;
     int fpsCap = 0;
     bool serve = false;
@@ -61,6 +62,22 @@ struct Options {
     // Diagnostic modes run after logging is set up, so --log works for them too.
     std::wstring testMode;
 };
+
+const wchar_t* CodecLabel(VideoCodec codec) {
+    switch (codec) {
+        case VideoCodec::Hevc: return L"HEVC";
+        case VideoCodec::Av1: return L"AV1";
+        default: return L"H.264";
+    }
+}
+
+// AV1 comes out as a raw OBU stream rather than an Annex-B byte stream, so it
+// gets its own extension - ffmpeg reads it with "-f obu", and calling it .h264
+// would only send the next person down a blind alley. H.264 and HEVC keep the
+// single name the dump harness has always used.
+const wchar_t* BitstreamFileName(VideoCodec codec) {
+    return codec == VideoCodec::Av1 ? L"capture.obu" : L"capture.h264";
+}
 
 // Distinct exit codes, because an autostarted host has nowhere to print.
 constexpr int kExitLogOpenFailed = 21;
@@ -661,8 +678,15 @@ int RunServer(const Options& opts) {
                     wprintf(L"virtual pad rejected input: %hs\n", submitError.c_str());
                 }
             };
-            fresh->onReleaseInput = [pad = gamepad.get()] { pad->ReleaseAll(); };
         }
+
+        // Deliberately outside the `if (gamepad)` above: mouse buttons need
+        // releasing whether or not a virtual pad exists, and hanging this off the
+        // pad meant a host with no ViGEm driver released nothing at all.
+        fresh->onReleaseInput = [pad = gamepad.get()] {
+            if (pad) pad->ReleaseAll();
+            InputInjector::ReleaseHeldButtons();
+        };
 
         // lastError is read by the status callback under this same lock, so it
         // is only ever written here and in stopService.
@@ -698,6 +722,7 @@ int RunServer(const Options& opts) {
         session.reset();
         // Anything the client was holding down is not coming back up on its own.
         if (gamepad) gamepad->ReleaseAll();
+        InputInjector::ReleaseHeldButtons();
         wprintf(L"Streaming service stopped; the web console is still up.\n");
     };
 
@@ -870,6 +895,8 @@ void PrintUsage() {
         L"  --seconds N     how long to run (default 10)\n"
         L"  --encode        encode with NVENC to capture.h264 instead of dumping PNGs\n"
         L"  --hevc          use HEVC instead of H.264 (implies --encode)\n"
+        L"  --av1           use AV1 instead of H.264 (implies --encode; needs an\n"
+        L"                  Ada-generation GPU, RTX 40 series or newer)\n"
         L"  --bitrate N     encoder bitrate in kbps (default 20000)\n"
         L"  --fps N         cap capture rate at N fps (default: uncapped)\n"
         L"  --serve         run as a streaming server for the Thor client\n"
@@ -912,7 +939,7 @@ int RunCapture(const WindowEntry& target, const Options& opts) {
     std::string encoderError;
 
     if (opts.encode) {
-        const auto path = outDir / "capture.h264";
+        const auto path = outDir / BitstreamFileName(opts.codec);
         bitstreamFile.open(path, std::ios::binary | std::ios::trunc);
         wprintf(L"Writing bitstream to %s\n\n", path.wstring().c_str());
     }
@@ -933,14 +960,25 @@ int RunCapture(const WindowEntry& target, const Options& opts) {
                     settings.height = frame.cropHeight;
                     settings.framerate = opts.fpsCap > 0 ? opts.fpsCap : 60;
                     settings.bitrateKbps = opts.bitrateKbps;
-                    settings.useHevc = opts.hevc;
+                    settings.codec = opts.codec;
                     settings.fullRange = opts.fullRange;
                     encoder = NvencEncoder::Create(device.device.get(), device.context.get(),
                                                    settings, &encoderError);
                     if (encoder) {
+                        const auto& header = encoder->SequenceHeader();
                         wprintf(L"NVENC ready: %s %dx%d @ %d kbps, sequence header %zu bytes\n",
-                                opts.hevc ? L"HEVC" : L"H.264", settings.width, settings.height,
-                                settings.bitrateKbps, encoder->SequenceHeader().size());
+                                CodecLabel(opts.codec), settings.width, settings.height,
+                                settings.bitrateKbps, header.size());
+                        // Printed in full because this is the one thing a client
+                        // author cannot guess: it is what has to reach the
+                        // decoder as codec-specific data, byte for byte.
+                        wprintf(L"  header bytes:");
+                        for (const uint8_t byte : header) wprintf(L" %02X", byte);
+                        wprintf(L"\n");
+                        if (!encoder->BitstreamDescription().empty()) {
+                            wprintf(L"  bitstream: %hs\n",
+                                    encoder->BitstreamDescription().c_str());
+                        }
                     } else {
                         wprintf(L"NVENC unavailable: %hs\n", encoderError.c_str());
                     }
@@ -1059,7 +1097,8 @@ int wmain(int argc, wchar_t** argv) {
 
         else if (arg == L"--display-switch-test") opts.testMode = L"display-switch-test";
         else if (arg == L"--encode") opts.encode = true;
-        else if (arg == L"--hevc") { opts.hevc = true; opts.encode = true; }
+        else if (arg == L"--hevc") { opts.codec = VideoCodec::Hevc; opts.encode = true; }
+        else if (arg == L"--av1") { opts.codec = VideoCodec::Av1; opts.encode = true; }
         else if (arg == L"--full-range") opts.fullRange = true;
         else if (arg.rfind(L"--", 0) == 0) {
             wprintf(L"Unknown option %s\n", arg.c_str());

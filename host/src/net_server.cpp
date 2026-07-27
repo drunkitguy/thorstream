@@ -178,6 +178,13 @@ void StreamServer::AcceptLoop() {
             streaming_ = false;
             if (callbacks_.stopSession) callbacks_.stopSession();
         }
+        // Outside the streaming_ test on purpose: mouse buttons are injected
+        // unconditionally below, with no such guard, so a client that connected,
+        // pressed, and vanished without ever sending START leaves a button held
+        // that stopSession would never have been called to release. The session's
+        // own release path covers the streaming case; this covers the rest, and
+        // releasing twice is a no-op because the held set is taken atomically.
+        InputInjector::ReleaseHeldButtons();
         CloseClient();
         wprintf(L"client disconnected\n");
     }
@@ -233,6 +240,10 @@ void StreamServer::HandleMessage(protocol::MessageType type, const uint8_t* data
 
         case protocol::MessageType::Stop:
             if (streaming_.exchange(false) && callbacks_.stopSession) callbacks_.stopSession();
+            // Unguarded, for the same reason as the disconnect path: a client may
+            // press buttons on a socket that never carried a stream, and STOP is
+            // the point at which it has stopped being able to lift them.
+            InputInjector::ReleaseHeldButtons();
             break;
 
         case protocol::MessageType::RequestIdr:
@@ -401,6 +412,11 @@ void StreamServer::HandleLaunch(protocol::Reader& reader) {
         SendError("malformed LAUNCH");
         return;
     }
+    if (!protocol::IsKnownCodec(codec)) {
+        SendError("this host does not know codec " + std::to_string(codec) +
+                  " - ask for H.264 (0), HEVC (1) or AV1 (2), or update the host");
+        return;
+    }
 
     request.width = static_cast<int>(width);
     request.height = static_cast<int>(height);
@@ -449,6 +465,13 @@ void StreamServer::HandleStart(protocol::Reader& reader) {
     if (!reader.U64(request.windowId) || !reader.U32(width) || !reader.U32(height) ||
         !reader.U32(fps) || !reader.U32(bitrate) || !reader.U8(codec) || !reader.U16(udpPort)) {
         SendError("malformed START");
+        return;
+    }
+    // Rejected here rather than downgraded silently, so that the codec echoed
+    // back in STARTED is always the codec actually being encoded.
+    if (!protocol::IsKnownCodec(codec)) {
+        SendError("this host does not know codec " + std::to_string(codec) +
+                  " - ask for H.264 (0), HEVC (1) or AV1 (2), or update the host");
         return;
     }
 

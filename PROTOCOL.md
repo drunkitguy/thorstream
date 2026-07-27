@@ -31,7 +31,7 @@ byte[]  payload          // payloadLength - 1 bytes
 | Type | Name | Payload |
 |---|---|---|
 | `0x01` | `HELLO` | `uint16 protocolVersion`, `string clientName` |
-| `0x03` | `START` | `uint64 windowId`, `uint32 width`, `uint32 height`, `uint32 fps`, `uint32 bitrateKbps`, `uint8 codec` (0 = H.264, 1 = HEVC), `uint16 clientUdpPort` |
+| `0x03` | `START` | `uint64 windowId`, `uint32 width`, `uint32 height`, `uint32 fps`, `uint32 bitrateKbps`, `uint8 codec` (0 = H.264, 1 = HEVC, 2 = AV1), `uint16 clientUdpPort` |
 | `0x05` | `STOP` | — |
 | `0x06` | `REQUEST_IDR` | — |
 | `0x07` | `GAMEPAD` | `GamepadState` (see below) |
@@ -58,6 +58,32 @@ configure its decoder with.
 `sequenceHeader` is the SPS/PPS (or VPS/SPS/PPS) in Annex-B form, so the client
 can configure its decoder before the first frame lands. The encoder also repeats
 these inline on every IDR, so a client that ignores this field still works.
+
+For AV1 the field carries a bare `OBU_SEQUENCE_HEADER` in low-overhead format
+(`obu_has_size_field = 1`, no temporal-unit size prefixes) — **not** an
+`AV1CodecConfigurationRecord`/`av1C` box. It is the sequence header and nothing
+else, verified at 1080p (16 bytes) and 4K (17 bytes), so it can be used
+unmodified as the `configOBUs` field of an `av1C` record with no stripping. A
+consumer may still scan for OBU type 1 rather than assume byte 0; that costs
+nothing and stays correct if NVENC ever changes.
+
+Android's `MediaFormat` documents `csd-0` for AV1 as an optional
+`AV1CodecConfigurationRecord`, so a client must either wrap these bytes into
+that record itself or, more simply, omit `csd-0` altogether: the host sets
+`repeatSeqHdr`, so the same sequence header OBU precedes every keyframe in the
+stream and `MediaCodec` configures from it.
+
+The video itself is a different shape from this field: each **reassembled** video
+frame is a complete AV1 temporal unit and therefore opens with a temporal
+delimiter OBU (`12 00`), as the spec requires. An individual datagram is not —
+frames are fragmented across several, so only the first fragment of a frame
+carries those bytes. That delimiter belongs to the frame, not to
+`sequenceHeader`.
+
+The host never substitutes a codec silently. A codec byte it does not recognise
+is rejected with `ERROR`, and a codec it recognises but the GPU cannot encode is
+rejected with `ERROR` naming that codec. The `codec` field in `STARTED` is
+therefore always the codec actually being encoded, and equals the one requested.
 
 `windowId` is the host's `HWND` widened to 64 bits. It is only valid for the
 lifetime of that window — always `START` against an id from a fresh
