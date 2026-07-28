@@ -49,6 +49,11 @@ internal static class Program
         // Optional max encode size, to exercise the host's downscaling path.
         int maxWidth = args.Length > 4 ? int.Parse(args[4]) : 0;
         int maxHeight = args.Length > 5 ? int.Parse(args[5]) : 0;
+        // Wire codec value, so the host's negotiation and rejection paths can be
+        // exercised without a handheld: 0 = H.264, 1 = HEVC, 2 = AV1. Deliberately
+        // not validated here - passing an unknown value is how the host's
+        // rejection is tested.
+        byte codecRequest = args.Length > 6 ? byte.Parse(args[6]) : (byte)0;
 
         using var tcp = new TcpClient();
         await tcp.ConnectAsync(host, port);
@@ -101,7 +106,7 @@ internal static class Program
         start.U32((uint)maxHeight);
         start.U32(60);           // fps
         start.U32(30000);        // kbps
-        start.U8(0);             // H.264
+        start.U8(codecRequest);
         start.U16((ushort)udpPort);
         await SendAsync(stream, MessageType.Start, start);
 
@@ -119,7 +124,10 @@ internal static class Program
         byte codec = reader.U8();
         int headerLength = reader.U16();
         byte[] sequenceHeader = reader.Bytes(headerLength);
-        Console.WriteLine($"STARTED: {width}x{height} codec={(codec == 0 ? "H.264" : "HEVC")} sequenceHeader={sequenceHeader.Length} bytes\n");
+        string codecName = codec switch { 0 => "H.264", 1 => "HEVC", 2 => "AV1", _ => $"unknown({codec})" };
+        string headerHex = string.Join(" ", sequenceHeader.Take(8).Select(b => b.ToString("X2")));
+        Console.WriteLine($"STARTED: {width}x{height} codec={codecName} (asked for {codecRequest}) " +
+                          $"sequenceHeader={sequenceHeader.Length} bytes [{headerHex}...]\n");
 
         // Collect video.
         var assembler = new FrameAssembler();
