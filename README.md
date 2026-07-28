@@ -206,7 +206,7 @@ The host prints its state on startup. A working server looks like this:
 Virtual Xbox 360 pad ready.
 Listening for a client on port 47810.
   Point the Thor client at one of these:
-    192.168.0.3:47810
+    192.168.1.10:47810
 ```
 
 If you want to confirm independently that it is listening:
