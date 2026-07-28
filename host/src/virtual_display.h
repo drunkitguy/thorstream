@@ -8,6 +8,8 @@
 #include <thread>
 #include <vector>
 
+#include "display_topology.h"
+
 namespace thorstream {
 
 struct VirtualDisplayRequest {
@@ -55,5 +57,26 @@ private:
     std::thread pingThread_;
     std::atomic<bool> running_{false};
 };
+
+// Puts `snapshot` back, removing `display` if that is what stands in the way.
+//
+// Two attempts, in this order for a reason. The first runs with the virtual
+// display still attached, so there is never a moment with nothing at all
+// displaying - the single worst outcome this code has. If that does not
+// reproduce the snapshot, the virtual display is almost always why: MakePrimary
+// left it at the origin, which is the coordinate a physical display is trying
+// to return to, and Windows will not hand the same coordinates to two displays.
+// Measured: with it still up, everything comes back shifted by exactly its
+// width; dropping it and restoring again fixes that every time.
+//
+// The order is cheap-and-targeted first, destructive-and-untargeted last: only
+// the second attempt is allowed to escalate to RestoreDefaultTopology, and only
+// then for a display that is missing outright.
+//
+// One function rather than one per caller: the session teardown and the
+// diagnostic modes need identical behaviour, and two copies of this had already
+// drifted apart within minutes of being written.
+bool RestoreDisplaysAround(const std::vector<SavedDisplay>& snapshot,
+                           std::unique_ptr<VirtualDisplay>& display);
 
 }  // namespace thorstream

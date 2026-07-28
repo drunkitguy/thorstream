@@ -159,6 +159,18 @@ bool Session::PrepareVirtualDisplay(int width, int height, int fps) {
     if (!DisplayTopology::MakePrimary(virtualDisplay_->DeviceName(), &topologyError)) {
         wprintf(L"Could not make the virtual display primary (%hs); streaming the window as-is.\n",
                 topologyError.c_str());
+        // Say what that costs, because the client cannot tell. The frame it gets
+        // is still exactly the size it asked for, so its own check that the
+        // picture matches its screen passes - but the picture is now one window
+        // downscaled off a physical display rather than a whole desktop, while
+        // touch coordinates are still injected as a fraction of the *whole*
+        // virtual desktop (MOUSEEVENTF_VIRTUALDESK). On this machine that means
+        // a tap lands somewhere across every attached monitor instead of on the
+        // game. Task #22 sends the capture rect so the client can map properly;
+        // until then this line is the only warning anyone gets.
+        wprintf(L"  The game will render at the desktop resolution and be downscaled, and touch\n"
+                L"  input will be misaligned: taps are mapped across all attached displays, not\n"
+                L"  onto the streamed window.\n");
         RestoreDisplays();
         return false;
     }
@@ -504,7 +516,9 @@ void Session::RestoreDisplays() {
     // every other display, which needs putting back even if none were detached.
     if (topologyChanged_) {
         wprintf(L"Restoring physical displays...\n");
-        DisplayTopology::Restore(savedDisplays_);
+        if (!RestoreDisplaysAround(savedDisplays_, virtualDisplay_)) {
+            wprintf(L"The displays are not exactly as they were; check Display settings.\n");
+        }
         topologyChanged_ = false;
         displaysDetached_ = false;
     }
@@ -513,8 +527,8 @@ void Session::RestoreDisplays() {
     displayWidth_ = 0;
     displayHeight_ = 0;
 
-    // Drop the virtual display only after the real ones are back, so the desktop
-    // is never left with nothing at all.
+    // Normally dropped only after the real ones are back, so the desktop is
+    // never left with nothing at all. Already gone if the retry above ran.
     virtualDisplay_.reset();
 
     if (capturedWindow_ && savedPlacementValid_ && IsWindow(capturedWindow_)) {

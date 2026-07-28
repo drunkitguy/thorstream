@@ -139,6 +139,39 @@ std::unique_ptr<VirtualDisplay> VirtualDisplay::Create(const VirtualDisplayReque
     return self;
 }
 
+bool RestoreDisplaysAround(const std::vector<SavedDisplay>& snapshot,
+                           std::unique_ptr<VirtualDisplay>& display) {
+    // Non-escalating: with the virtual display still holding the origin a
+    // mismatch here is expected, and reaching for RestoreDefaultTopology before
+    // the remedy that actually works would blank every monitor for nothing.
+    if (DisplayTopology::TryRestore(snapshot) == DisplayTopology::RestoreOutcome::Restored) {
+        return true;
+    }
+    if (!display) {
+        // No virtual display to get out of the way, so the second attempt has
+        // nothing new to try - but a missing display still deserves the
+        // escalation, and only Restore will do that.
+        return DisplayTopology::Restore(snapshot);
+    }
+
+    wprintf(L"Retrying the restore without the virtual display...\n");
+    const std::wstring virtualName = display->DeviceName();
+    display.reset();
+
+    // Removing the monitor is asynchronous; restoring before Windows has
+    // finished would fail again for exactly the same reason.
+    for (int i = 0; i < 30 && !virtualName.empty(); ++i) {
+        bool stillAttached = false;
+        for (const auto& entry : DisplayTopology::Snapshot()) {
+            if (entry.deviceName == virtualName) stillAttached = true;
+        }
+        if (!stillAttached) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    return DisplayTopology::Restore(snapshot);
+}
+
 void VirtualDisplay::PingLoop() {
     while (running_) {
         if (!sudovda::Ping(impl_->device)) {

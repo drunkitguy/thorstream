@@ -61,6 +61,11 @@ struct Options {
     std::wstring logPath;
     // Diagnostic modes run after logging is set up, so --log works for them too.
     std::wstring testMode;
+    // --make-primary-test only: try each way of staging a rearrangement and
+    // report which the machine accepts. Off by default because proving each
+    // combination independently means committing the arrangement back between
+    // them, which is several extra mode sets on the user's monitors.
+    bool probeStaging = false;
 };
 
 const wchar_t* CodecLabel(VideoCodec codec) {
@@ -386,22 +391,25 @@ int RunDisplaySwitchTest(int width, int height, int seconds) {
     const auto snapshot = DisplayTopology::Snapshot();
     DisplayTopology::MarkDetached(snapshot);
 
+    bool reached = false;
     if (!DisplayTopology::Attach(display->DeviceName(), width, height, 60, &error)) {
         wprintf(L"Attach failed: %hs\n", error.c_str());
-        DisplayTopology::ClearMarker();
-        return 1;
+    } else {
+        wprintf(L"Detaching physical displays for %d seconds...\n", seconds);
+        if (!DisplayTopology::KeepOnly(display->DeviceName(), &error)) {
+            wprintf(L"Detach failed: %hs\n", error.c_str());
+        } else {
+            reached = true;
+            Sleep(static_cast<DWORD>(seconds) * 1000);
+        }
     }
 
-    wprintf(L"Detaching physical displays for %d seconds...\n", seconds);
-    if (!DisplayTopology::KeepOnly(display->DeviceName(), &error)) {
-        wprintf(L"Detach failed: %hs\n", error.c_str());
-        DisplayTopology::ClearMarker();
-        return 1;
-    }
-
-    Sleep(static_cast<DWORD>(seconds) * 1000);
-
-    const bool restored = DisplayTopology::Restore(snapshot);
+    // Unconditional, like RunMakePrimaryTest. Attaching the virtual display is a
+    // change to the arrangement in its own right, so a failure after that point
+    // owes the user a restore just as much as a success does - clearing the
+    // marker and returning, as this used to, left the desktop rearranged AND
+    // threw away the record that would have recovered it on the next run.
+    const bool restored = RestoreDisplaysAround(snapshot, display);
     DisplayTopology::ClearMarker();
     display.reset();
     Sleep(1500);
@@ -412,7 +420,169 @@ int RunDisplaySwitchTest(int width, int height, int seconds) {
                 entry.mode.dmPelsHeight, entry.mode.dmPosition.x, entry.mode.dmPosition.y,
                 entry.primary ? " [primary]" : "");
     }
-    return restored ? 0 : 1;
+    return (restored && reached) ? 0 : 1;
+}
+
+// Stages a whole rearrangement and reports where it was refused. CDS_NORESET
+// means the trial itself reaches nothing: no combination tried here is ever
+// committed.
+//
+// Recovering from it is a different matter, and this is not a read-only probe.
+// A refused staging call poisons the pending arrangement - every call after it
+// fails too - so without clearing that between trials the first failure would
+// decide all the others and the matrix would prove nothing. Clearing it means
+// committing the real arrangement back, which is a genuine topology change.
+// DisplayTopology::Restore is used for that because it reads the desktop back
+// rather than trusting a return code; a blind commit here previously moved a
+// 120Hz panel to a driver-default position at 60Hz.
+//
+// Note the limit this leaves: a trial only measures a clean desktop if the
+// recovery before it worked. That is checked and reported, not assumed.
+//
+// This exists because "which of the two things I changed actually mattered" is
+// not answerable from a fix that works: it needs the failing case run again,
+// one variable at a time, on the machine that failed.
+void ProbeStaging(const std::vector<SavedDisplay>& displays, const std::wstring& targetName,
+                  bool targetFirst, bool positionOnly) {
+    const SavedDisplay* target = nullptr;
+    for (const auto& display : displays) {
+        if (display.deviceName == targetName) target = &display;
+    }
+    if (!target) return;
+
+    const LONG shiftX = -target->mode.dmPosition.x;
+    const LONG shiftY = -target->mode.dmPosition.y;
+
+    const auto stage = [&](const SavedDisplay& display) -> LONG {
+        DEVMODEW mode{};
+        mode.dmSize = sizeof(mode);
+        if (!EnumDisplaySettingsExW(display.deviceName.c_str(), ENUM_CURRENT_SETTINGS, &mode, 0)) {
+            mode = display.mode;
+            mode.dmSize = sizeof(mode);
+        }
+        mode.dmPosition.x = display.mode.dmPosition.x + shiftX;
+        mode.dmPosition.y = display.mode.dmPosition.y + shiftY;
+        mode.dmFields = positionOnly ? DM_POSITION : (mode.dmFields | DM_POSITION);
+
+        DWORD flags = CDS_UPDATEREGISTRY | CDS_NORESET;
+        if (display.deviceName == targetName) flags |= CDS_SET_PRIMARY;
+        return ChangeDisplaySettingsExW(display.deviceName.c_str(), &mode, nullptr, flags, nullptr);
+    };
+
+    wprintf(L"  %-14s %-14s : ", targetFirst ? L"target first" : L"snapshot order",
+            positionOnly ? L"position only" : L"full mode");
+
+    LONG code = DISP_CHANGE_SUCCESSFUL;
+    std::wstring failedOn;
+
+    if (targetFirst) {
+        code = stage(*target);
+        if (code != DISP_CHANGE_SUCCESSFUL) failedOn = target->deviceName;
+    }
+    if (code == DISP_CHANGE_SUCCESSFUL) {
+        for (const auto& display : displays) {
+            if (targetFirst && display.deviceName == targetName) continue;
+            code = stage(display);
+            if (code != DISP_CHANGE_SUCCESSFUL) {
+                failedOn = display.deviceName;
+                break;
+            }
+        }
+    }
+
+    if (code == DISP_CHANGE_SUCCESSFUL) {
+        wprintf(L"all %zu displays staged\n", displays.size());
+    } else {
+        wprintf(L"REFUSED by %s (code %ld)\n", failedOn.c_str(), code);
+    }
+
+    // Undo the half-staged arrangement, so the next trial starts from a clean
+    // pending state. Reported rather than assumed: if this fails, whatever the
+    // next trial measures is about the leftovers, not about the combination it
+    // names.
+    if (!DisplayTopology::Restore(displays)) {
+        wprintf(L"    WARNING: could not put the arrangement back - later rows are unreliable\n");
+    }
+}
+
+// Just the half of the switch that runs before a game launches: create the
+// virtual display, attach it, and move the origin onto it, with every physical
+// display left attached. That is the step that failed in the field, and it is
+// the safe half to test - nothing is detached, so the worst case is a
+// rearranged desktop, which is restored below either way.
+int RunMakePrimaryTest(int width, int height, int seconds, bool probeStaging) {
+    const auto report = [](const wchar_t* label) {
+        wprintf(L"%s\n", label);
+        for (const auto& display : DisplayTopology::Snapshot()) {
+            wprintf(L"  %s  %ux%u @%uHz at (%d,%d)%hs\n", display.deviceName.c_str(),
+                    display.mode.dmPelsWidth, display.mode.dmPelsHeight,
+                    display.mode.dmDisplayFrequency, display.mode.dmPosition.x,
+                    display.mode.dmPosition.y, display.primary ? "  [primary]" : "");
+        }
+    };
+
+    report(L"Displays before:");
+    const auto snapshot = DisplayTopology::Snapshot();
+
+    VirtualDisplayRequest request;
+    request.width = width;
+    request.height = height;
+    request.refreshRate = 60;
+
+    std::string error;
+    auto display = VirtualDisplay::Create(request, &error);
+    if (!display) {
+        wprintf(L"Could not create the virtual display: %hs\n", error.c_str());
+        return 1;
+    }
+    wprintf(L"\nVirtual display: %s\n", display->DeviceName().c_str());
+    report(L"After creating the monitor (before it is attached):");
+
+    // From here the desktop owes the user a restore even if a step fails.
+    DisplayTopology::MarkDetached(snapshot);
+
+    int exitCode = 1;
+    if (!DisplayTopology::Attach(display->DeviceName(), width, height, 60, &error)) {
+        wprintf(L"Attach failed: %hs\n", error.c_str());
+    } else {
+        report(L"\nAfter attaching:");
+
+        // One variable at a time, before the real attempt changes anything.
+        if (probeStaging) {
+            wprintf(L"\nChangeDisplaySettingsEx staging probe:\n");
+            const auto attached = DisplayTopology::Snapshot();
+            ProbeStaging(attached, display->DeviceName(), false, false);
+            ProbeStaging(attached, display->DeviceName(), false, true);
+            ProbeStaging(attached, display->DeviceName(), true, false);
+            ProbeStaging(attached, display->DeviceName(), true, true);
+        }
+
+        wprintf(L"\n");
+        if (DisplayTopology::MakePrimary(display->DeviceName(), &error)) {
+            report(L"\nAfter MakePrimary:");
+            int actualWidth = 0, actualHeight = 0;
+            if (DisplayTopology::CurrentMode(display->DeviceName(), &actualWidth, &actualHeight)) {
+                wprintf(L"\nThe virtual display is in %dx%d - a game launched now would open here.\n",
+                        actualWidth, actualHeight);
+            }
+            wprintf(L"Holding for %d seconds.\n", seconds);
+            Sleep(static_cast<DWORD>(seconds) * 1000);
+            exitCode = 0;
+        } else {
+            wprintf(L"\nMakePrimary FAILED: %hs\n", error.c_str());
+        }
+    }
+
+    // Unconditional: the physical displays go back whether this proved anything
+    // or not.
+    const bool restored = RestoreDisplaysAround(snapshot, display);
+    DisplayTopology::ClearMarker();
+    display.reset();
+    Sleep(1500);
+
+    wprintf(L"\nRestore %hs.\n", restored ? "succeeded" : "FAILED");
+    report(L"Displays after:");
+    return restored ? exitCode : 1;
 }
 
 // Reads the library and converts a few covers, reporting the size reduction.
@@ -1096,6 +1266,8 @@ int wmain(int argc, wchar_t** argv) {
         else if (arg == L"--vdisplay-test") opts.testMode = L"vdisplay-test";
 
         else if (arg == L"--display-switch-test") opts.testMode = L"display-switch-test";
+        else if (arg == L"--make-primary-test") opts.testMode = L"make-primary-test";
+        else if (arg == L"--probe-staging") opts.probeStaging = true;
         else if (arg == L"--encode") opts.encode = true;
         else if (arg == L"--hevc") { opts.codec = VideoCodec::Hevc; opts.encode = true; }
         else if (arg == L"--av1") { opts.codec = VideoCodec::Av1; opts.encode = true; }
@@ -1134,6 +1306,14 @@ int wmain(int argc, wchar_t** argv) {
     // broken. Safe to do now that stdout is known-good.
     setvbuf(stdout, nullptr, _IONBF, 0);
 
+    // If a previous run died with the displays rearranged or detached, put them
+    // back before anything else. Ahead of the diagnostic modes, not after them:
+    // the display test modes are the most likely thing to have been killed
+    // partway through, and they used to return without ever reaching this - so
+    // the one command someone would rerun to investigate was the one command
+    // that ignored the marker its own crash had left.
+    DisplayTopology::RecoverIfMarked();
+
     // Diagnostic modes run here, after logging is configured, so --log captures
     // them. Dispatching them during argument parsing meant their output went to
     // a detached console and was simply lost.
@@ -1146,14 +1326,12 @@ int wmain(int argc, wchar_t** argv) {
         if (opts.testMode == L"vdisplay-probe") return RunVirtualDisplayProbe();
         if (opts.testMode == L"vdisplay-test") return RunVirtualDisplayTest(1920, 1080, 60, 10);
         if (opts.testMode == L"display-switch-test") return RunDisplaySwitchTest(1920, 1080, 8);
+        if (opts.testMode == L"make-primary-test") {
+            return RunMakePrimaryTest(1920, 1080, 5, opts.probeStaging);
+        }
     }
 
     wprintf(L"=== thorstream host ===\n");
-
-    // If a previous run died with the physical displays detached, put them back
-    // before anything else. This is the recovery path for a crash or hard kill,
-    // and it must run whether or not we go on to serve.
-    DisplayTopology::RecoverIfMarked();
 
     if (!WindowCapture::IsSupported()) {
         wprintf(L"Windows.Graphics.Capture is not supported on this machine.\n");

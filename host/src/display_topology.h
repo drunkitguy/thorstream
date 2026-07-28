@@ -36,6 +36,11 @@ public:
     // Moves the origin onto `deviceName`, which is what "primary" means to
     // Windows and to a game choosing a display. Every other display is shifted
     // by the same offset, so the arrangement is preserved.
+    //
+    // Returning false does NOT mean the desktop was left alone. Windows can
+    // accept a rearrangement and then not mark the display primary, and it can
+    // fail an apply partway; both leave displays moved. The caller owes the user
+    // a Restore on failure just as much as on success.
     static bool MakePrimary(const std::wstring& deviceName, std::string* error);
 
     // Leaves only `keepDeviceName` attached, and makes it primary.
@@ -45,6 +50,24 @@ public:
     // pick a mode, so the size asked for is not necessarily the size in use.
     static bool CurrentMode(const std::wstring& deviceName, int* width, int* height);
 
+    // How close the desktop ended up to the snapshot. The distinction is what
+    // decides whether escalating to RestoreDefaultTopology could possibly help:
+    // that call chooses which displays are active and nothing else, so it can
+    // address Missing and can do nothing at all about Drifted.
+    enum class RestoreOutcome {
+        Restored,  // exactly as saved
+        Drifted,   // everything is back, but not all where or how it was
+        Missing,   // at least one saved display is not attached
+    };
+
+    // Puts the arrangement back and reports what actually happened, without
+    // taking any further action. Callers that can remove whatever is standing
+    // in the way - the virtual display, usually - should use this, deal with
+    // it, and try again before resorting to Restore.
+    static RestoreOutcome TryRestore(const std::vector<SavedDisplay>& snapshot);
+
+    // TryRestore, escalating to RestoreDefaultTopology if and only if a display
+    // did not come back at all. Returns whether the desktop matches `snapshot`.
     static bool Restore(const std::vector<SavedDisplay>& snapshot);
 
     // Last-ditch recovery when an exact restore is impossible - after a crash,
