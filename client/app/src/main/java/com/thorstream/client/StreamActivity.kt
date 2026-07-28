@@ -1,5 +1,6 @@
 package com.thorstream.client
 
+import android.annotation.SuppressLint
 import android.os.Build
 import android.text.Editable
 import android.text.TextWatcher
@@ -21,7 +22,10 @@ import androidx.lifecycle.lifecycleScope
 import com.thorstream.client.databinding.ActivityStreamBinding
 import kotlinx.coroutines.launch
 import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.exp
+import kotlin.math.min
+import kotlin.math.roundToInt
 
 /** The actual streaming screen: video in, gamepad out. */
 class StreamActivity : AppCompatActivity() {
@@ -32,6 +36,9 @@ class StreamActivity : AppCompatActivity() {
     private var receiver: VideoReceiver? = null
     private var decoder: VideoDecoder? = null
     private lateinit var gamepad: GamepadTracker
+    private lateinit var touch: TouchController
+    private var touchEnabled = true
+    private var touchMappable = false
 
     private val handler = Handler(Looper.getMainLooper())
     private var surfaceReady = false
@@ -57,7 +64,16 @@ class StreamActivity : AppCompatActivity() {
     private var loadingErrorRank = ERROR_RANK_NONE
     private var stallReported = false
     private var pendingSession: SessionInfo? = null
+    private var pendingCodec: Byte = Protocol.CODEC_H264
 
+    // The codecs to try, best first, and where we are in that list. Fixed in
+    // onCreate: the chain is a property of this device and this user's setting,
+    // and it must not change underneath a retry.
+    private var codecChain: List<Byte> = listOf(Protocol.CODEC_H264)
+    private var codecIndex = 0
+    private var fallbackInFlight = false
+
+    @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityStreamBinding.inflate(layoutInflater)
@@ -73,6 +89,30 @@ class StreamActivity : AppCompatActivity() {
 
         gamepad = GamepadTracker { state -> control?.sendGamepad(state) }
 
+        // Read from the preferences rather than an intent extra: a front end
+        // such as Cocoon reaches this screen without passing through the picker
+        // that would otherwise carry the flag. The codec preference is read here
+        // for the same reason.
+        val prefs = getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE)
+        touchEnabled = prefs.getBoolean(MainActivity.KEY_TOUCH, true)
+        codecChain = CodecSupport.chainFor(prefs.getInt(MainActivity.KEY_CODEC, CodecSupport.PREF_AUTO))
+        Log.i(TAG, "codec chain: ${codecChain.joinToString { Protocol.codecName(it) }}")
+
+        touch = TouchController(
+            // The overlay is opaque and full screen but not clickable, so its
+            // touches reach the surface behind it. Nothing the user cannot see
+            // should be able to move the pointer on the PC.
+            enabled = { touchEnabled && touchMappable && !loadingVisible },
+            onMove = { x, y -> control?.sendMouseMove(x, y) },
+            onButton = { button, pressed -> control?.sendMouseButton(button, pressed) },
+            onScroll = { delta -> control?.sendScroll(delta) },
+        )
+        // Only the video surface, and only through dispatchTouchEvent: a
+        // touchscreen never reaches dispatchGenericMotionEvent, so this and the
+        // gamepad's motion handling cannot swallow one another. The keyboard
+        // sink keeps its own touches, and the IME is a separate window.
+        binding.surface.setOnTouchListener { view, event -> touch.onTouch(view, event) }
+
         setUpKeyboardSink()
 
         binding.surface.holder.addCallback(object : SurfaceHolder.Callback {
@@ -83,7 +123,10 @@ class StreamActivity : AppCompatActivity() {
                 // three-minute launch - and connect() will not retry because the
                 // control connection is still up. Without this the session is
                 // stranded with no decoder and nothing to show for it.
-                pendingSession?.let { session -> startDecoder(session) }
+                // The codec goes with it: the session it was deferred from is
+                // the one that must be decoded, whatever the chain has moved on
+                // to since.
+                pendingSession?.let { session -> startDecoder(session, pendingCodec) }
             }
 
             override fun surfaceChanged(holder: SurfaceHolder, f: Int, w: Int, h: Int) = Unit
@@ -110,22 +153,41 @@ class StreamActivity : AppCompatActivity() {
 
         val connection = ControlConnection(lifecycleScope)
         control = connection
+        val codec = codecChain[codecIndex]
 
-        connection.onStarted = { session -> runOnUiThread { startDecoder(session) } }
+        connection.onStarted = { session ->
+            runOnUiThread { if (isCurrent(connection)) startDecoder(session, codec) }
+        }
         connection.onLaunchProgress = { message ->
             runOnUiThread {
-                setStatus(message)
-                showLaunchProgress(message)
+                if (isCurrent(connection)) {
+                    setStatus(message)
+                    showLaunchProgress(message)
+                }
             }
         }
         connection.onError = { message ->
             runOnUiThread {
+                if (!isCurrent(connection)) return@runOnUiThread
                 setStatus("Host: $message")
-                showLoadingError("The PC could not start the game", message, ERROR_RANK_REPORTED)
+                // The host never substitutes a codec silently: a GPU that cannot
+                // encode what was asked for says so and stops. That is a
+                // recoverable answer, not a dead end, as long as something else
+                // is left in the chain.
+                if (looksLikeCodecRefusal(message, codec)) {
+                    fallBack("Your PC refused ${Protocol.codecName(codec)}", message)
+                } else {
+                    showLoadingError("The PC could not start the game", message, ERROR_RANK_REPORTED)
+                }
             }
         }
         connection.onDisconnected = {
             runOnUiThread {
+                if (!isCurrent(connection)) return@runOnUiThread
+                // A codec refusal is often followed by the host dropping the
+                // channel. The retry is already scheduled and this would only
+                // paint a complaint over the explanation on its way out.
+                if (fallbackInFlight) return@runOnUiThread
                 setStatus("Disconnected from host.")
                 // Fallout rank: a single failed write drops the channel, and the
                 // real reason usually arrives right behind it.
@@ -137,7 +199,12 @@ class StreamActivity : AppCompatActivity() {
             }
         }
         connection.onPong = { sentMicros ->
-            latencyMillis = (nowMicros() - sentMicros) / 1000
+            // Measured on the read thread, applied on the main one: guarding it
+            // like the rest keeps a dropped connection's last pong from
+            // reporting a round trip for the session that replaced it, and
+            // leaves latencyMillis owned by the thread that reads it.
+            val trip = (nowMicros() - sentMicros) / 1000
+            runOnUiThread { if (isCurrent(connection)) latencyMillis = trip }
         }
 
         // Logged unconditionally: if the built-in controls are not enumerated as
@@ -165,7 +232,7 @@ class StreamActivity : AppCompatActivity() {
                         height = maxHeight,
                         fps = fps,
                         bitrateKbps = bitrate,
-                        codec = Protocol.CODEC_H264,
+                        codec = codec,
                         udpPort = udpPort,
                     )
                 } else {
@@ -175,7 +242,7 @@ class StreamActivity : AppCompatActivity() {
                         height = maxHeight,
                         fps = fps,
                         bitrateKbps = bitrate,
-                        codec = Protocol.CODEC_H264,
+                        codec = codec,
                         udpPort = udpPort,
                     )
                     // Nothing is being launched, so the host sends no progress
@@ -210,7 +277,7 @@ class StreamActivity : AppCompatActivity() {
      * there is never offered again by the host. Holding it in [pendingSession]
      * lets surfaceCreated finish the job instead of hanging on a dead screen.
      */
-    private fun startDecoder(session: SessionInfo) {
+    private fun startDecoder(session: SessionInfo, codec: Byte) {
         // STARTED can land after teardown: runOnUiThread still delivers once the
         // activity is destroyed. Configuring a codec against a dead surface
         // leaks it, and the stats ticker it would start reposts itself onto an
@@ -219,21 +286,46 @@ class StreamActivity : AppCompatActivity() {
         if (decoder != null) return
         if (!surfaceReady) {
             pendingSession = session
+            pendingCodec = codec
             loadingNote = "Waiting for the display to come back"
             return
         }
         pendingSession = null
 
-        setStatus("Decoding ${session.width}x${session.height}")
+        fitSurfaceToVideo(session.width, session.height)
+        touch.setVideoSize(session.width, session.height)
+        touchMappable = pictureLooksLikeTheDesktop(session)
+
+        val codecName = Protocol.codecName(codec)
+        setStatus("Decoding ${session.width}x${session.height} · $codecName")
         val videoDecoder = VideoDecoder(binding.surface.holder.surface)
         videoDecoder.onError = { message ->
             runOnUiThread {
+                // Identity-guarded like the connection callbacks: a decoder that
+                // a fallback has already released can still deliver one last
+                // error, and it must not paint a complaint over the attempt that
+                // replaced it - which would undo the very clearLoadingError that
+                // started the retry.
+                if (videoDecoder !== decoder) {
+                    Log.w(TAG, "error from a released decoder, ignored: $message")
+                    return@runOnUiThread
+                }
                 setStatus("Decoder error: $message")
-                showLoadingError("The video decoder failed", message, ERROR_RANK_REPORTED)
+                // A codec that dies before it has shown anything never worked in
+                // the first place, whatever it advertised - some decoders accept
+                // a format at configure() and only fail on the first buffer. That
+                // is the same failure as a refused configure and gets the same
+                // answer. After a picture has been on screen it is a fault in a
+                // working session, and dropping to a worse codec would not fix it.
+                if (!videoDecoder.hasRenderedFrame) {
+                    fallBack("$codecName could not decode this stream", message)
+                } else {
+                    showLoadingError("The video decoder failed", message, ERROR_RANK_REPORTED)
+                }
             }
         }
         try {
-            videoDecoder.start(session)
+            videoDecoder.start(session, codec)
             decoder = videoDecoder
             sessionStarted = true
             // STARTED is not a picture. This is the stage the complaint was
@@ -242,7 +334,7 @@ class StreamActivity : AppCompatActivity() {
             enterStage(
                 LoadStage.DECODING,
                 "Waiting for the first frame",
-                "Decoding ${session.width}x${session.height}",
+                "Decoding ${session.width}x${session.height} · $codecName",
             )
             // Anything the host sent before this moment went nowhere, including
             // the keyframe the stream opened with. Ask for a fresh one rather
@@ -251,14 +343,172 @@ class StreamActivity : AppCompatActivity() {
             lastIdrRequest = System.currentTimeMillis()
             startStatsTicker()
         } catch (e: Exception) {
+            // configure()/start() refusing the format is exactly what a device
+            // that lied about its decoder looks like, so this is a fallback
+            // trigger rather than a message. fallBack settles for an error when
+            // there is nothing left below.
             Log.e(TAG, "decoder failed to start", e)
             setStatus("Could not start the decoder: ${e.message}")
-            showLoadingError(
-                "Could not start the video decoder",
-                e.message ?: "unknown error",
-                ERROR_RANK_REPORTED,
-            )
+            fallBack("This device could not start a $codecName decoder", e.message ?: "unknown error")
         }
+    }
+
+    // ---- codec fallback ------------------------------------------------------
+
+    /**
+     * Whether an ERROR from the host is a refusal of THIS codec.
+     *
+     * The host has exactly two ways of saying that: an unrecognised codec byte
+     * ("this host does not know codec 2 ..."), and a GPU that knows the codec
+     * but cannot encode it ("NVENC: this GPU cannot encode AV1 ..."). The second
+     * names the codec deliberately, and that name is the whole test.
+     *
+     * Deliberately NOT the "NVENC: " prefix or the word "encoder". The host puts
+     * that prefix on every encoder-creation failure there is: a busy encoder
+     * (GeForce cards cap concurrent NVENC sessions), a driver too old for the
+     * NVENC API, out of memory, bad dimensions. None of those are fixed by
+     * asking for a different codec, and on the launch path every retry relaunches
+     * the game - so treating them as codec refusals would spend the whole chain,
+     * cost three launches, and finish on a diagnosis that was wrong from the
+     * start.
+     */
+    private fun looksLikeCodecRefusal(message: String, codec: Byte): Boolean {
+        val text = message.lowercase(Locale.US)
+        if ("does not know codec" in text) return true
+        if ("cannot encode" !in text) return false
+        return spellingsOf(codec).any { it in text }
+    }
+
+    /** The host writes one of these; the others are here so it may change its mind. */
+    private fun spellingsOf(codec: Byte): List<String> = when (codec) {
+        Protocol.CODEC_AV1 -> listOf("av1", "av01")
+        Protocol.CODEC_HEVC -> listOf("hevc", "h.265", "h265")
+        else -> listOf("h.264", "h264", "avc")
+    }
+
+    /**
+     * Drops to the next codec down and starts the session again.
+     *
+     * Bounded by construction: the chain is fixed at onCreate and the index only
+     * ever moves forwards, so the worst case is AV1, then HEVC, then H.264, then
+     * an honest error. Nothing here can loop.
+     */
+    private fun fallBack(headline: String, detail: String) {
+        if (isFinishing || isDestroyed) return
+        // A refused codec can produce several complaints at once - the host's
+        // ERROR, then the disconnect behind it - and they must not each consume
+        // a codec.
+        if (fallbackInFlight) return
+        // Only ever before the first picture. Once one has been on screen the
+        // codec demonstrably works on both ends, the overlay that would explain
+        // a retry is gone, and tearing a live session down for a worse codec
+        // would be a regression rather than a rescue.
+        if (decoder?.hasRenderedFrame == true) {
+            Log.w(TAG, "not falling back once a picture has shown: $headline ($detail)")
+            return
+        }
+
+        val failed = Protocol.codecName(codecChain[codecIndex])
+        if (codecIndex + 1 >= codecChain.size) {
+            showLoadingError(
+                headline,
+                "$detail\n\nThere is no other codec left to try.",
+                ERROR_RANK_DIAGNOSED,
+            )
+            return
+        }
+
+        fallbackInFlight = true
+        val next = Protocol.codecName(codecChain[codecIndex + 1])
+        Log.w(TAG, "falling back from $failed to $next: $detail")
+        setStatus("$failed failed — retrying with $next")
+        restartLoadingFor("Retrying with $next", "$failed did not work: $detail")
+
+        // Posted rather than done here: the overlay repaints with the reason
+        // before the teardown, which joins the receiver and decoder threads and
+        // can hold the main thread for a moment.
+        handler.postDelayed({
+            fallbackInFlight = false
+            if (isFinishing || isDestroyed) return@postDelayed
+            // Checked again, not only at the top of fallBack. The delay is a
+            // scheduling gap, and a first frame landing inside it is the
+            // ordinary slow start recovering: a keyframe is re-requested every
+            // second and the one that finally arrives renders in milliseconds,
+            // so the 8-second stall trigger in particular fires right next to
+            // the picture it was complaining about. Tearing that down would
+            // destroy a working session - and by then the loading ticker has
+            // hidden the overlay, which is what B and Back need to leave the
+            // screen and what keeps a live touch gesture off the PC.
+            if (decoder?.hasRenderedFrame == true) {
+                Log.i(TAG, "picture arrived during the fallback delay; staying on $failed")
+                setStatus("$failed recovered")
+                return@postDelayed
+            }
+            // Only now: a fallback that was abandoned must not have spent a
+            // codec, or a later real failure would skip one.
+            codecIndex++
+            teardownSession()
+            connect()
+        }, FALLBACK_DELAY_MS)
+    }
+
+    /** Everything a session owns, released, with the screen left standing. */
+    private fun teardownSession() {
+        // Before the connection goes: the stats ticker reposts itself from here
+        // and would otherwise tick against a half-released session.
+        sessionStarted = false
+        handler.removeCallbacks(statsTicker)
+        pendingSession = null
+        touchMappable = false
+        latencyMillis = -1
+        lastStatsFrames = 0
+        // Exactly what onDestroy does, and for the same reason: a button can
+        // genuinely be down here. A picture that reached the screen retires the
+        // overlay, which is what arms touch, so a retry can land mid-drag.
+        // close() would discard the release - it empties the queue before the
+        // sentinel - and nothing in the host, the protocol or Windows ever
+        // undoes a latched button. stopSessionAndClose gets it out on the
+        // writer thread, which outlives this teardown.
+        val heldButtons = if (::touch.isInitialized) touch.abandon() else emptyList()
+        control?.stopSessionAndClose(heldButtons)
+        control = null
+        receiver?.stop()
+        receiver = null
+        decoder?.stop()
+        decoder = null
+    }
+
+    /** True while [connection] is the one this screen is currently using. */
+    private fun isCurrent(connection: ControlConnection): Boolean = connection === control
+
+    /**
+     * Winds the overlay back for another attempt.
+     *
+     * Deliberately not enterStage, which refuses to move backwards: that rule
+     * exists so late progress messages cannot drag the bar back, but a retry
+     * genuinely does start the sequence again, and a bar parked at 90% through a
+     * second connect would be the lie it was meant to prevent. The elapsed clock
+     * is not reset - the user has been waiting since the first attempt.
+     */
+    private fun restartLoadingFor(label: String, note: String) {
+        clearLoadingError()
+        stallReported = false
+        loadStage = LoadStage.CONNECTING
+        stageEnteredAt = SystemClock.elapsedRealtime()
+        binding.loadingBar.progress = 0
+        loadingNote = note
+        binding.loadingStage.text = label
+
+        // The overlay is brought back in full, not merely redrawn. hideLoading
+        // both clears loadingVisible and removes the ticker, and the ticker is
+        // the only thing that can ever retire the overlay again - so setting the
+        // text without these two lines leaves an invisible overlay that cannot
+        // come back, while dispatchKeyEvent still gates B and Back on
+        // loadingVisible. That is a screen with no picture and no way off it.
+        loadingVisible = true
+        binding.loadingOverlay.visibility = View.VISIBLE
+        handler.removeCallbacks(loadingTicker)
+        handler.post(loadingTicker)
     }
 
     /** What Android thinks is attached, for when no button does anything at all. */
@@ -272,6 +522,86 @@ class StreamActivity : AppCompatActivity() {
         if (pads.isEmpty()) return NO_CONTROLLER
         return pads.joinToString(", ") { device ->
             "${device.name} (sources 0x${Integer.toHexString(device.sources)})"
+        }
+    }
+
+    /**
+     * Whether a touch can be mapped onto the host's desktop at all.
+     *
+     * The host injects with MOUSEEVENTF_VIRTUALDESK - 0..65535 across the whole
+     * virtual desktop - so the mapping only means anything while the picture IS
+     * the whole virtual desktop. The host arranges that on the launch path: a
+     * virtual display at the size we asked for, the physical displays detached,
+     * and the game's client area placed over the lot.
+     *
+     * The only evidence of that reaching this client is the encoded size, and it
+     * is ONE-WAY evidence. A size smaller than we asked for proves the capture
+     * is not the whole display - the window refused to resize, or the virtual
+     * display was never created and host/src/session.cpp fell through to
+     * "streaming the window as-is". A matching size proves nothing in the other
+     * direction: a bordered window's client area is the right size and still
+     * sits a caption height down the desktop, and a DetachPhysicalDisplays that
+     * failed leaves the virtual desktop spanning monitors that are not in the
+     * picture at all. Neither is visible from here.
+     *
+     * ASSUMPTION, deliberately left standing: when the sizes agree, the picture
+     * covers the desktop. The real fix is host-side - STARTED carrying the
+     * captured client rect's desktop origin and size, normalised through that
+     * instead - and is queued separately. This refuses the cases it can see
+     * rather than pretending to a test it cannot make.
+     */
+    private fun pictureLooksLikeTheDesktop(session: SessionInfo): Boolean {
+        val (panelWidth, panelHeight) = displaySize()
+        // FitPreservingAspect rounds down to an even size, so exact equality is
+        // the wrong test by a pixel.
+        val mapped = abs(session.width - panelWidth) <= SIZE_SLACK &&
+            abs(session.height - panelHeight) <= SIZE_SLACK
+        if (!mapped) {
+            Log.w(
+                TAG,
+                "touch disabled: encoded ${session.width}x${session.height} is not the " +
+                    "requested ${panelWidth}x${panelHeight}, so the picture is not the " +
+                    "whole desktop and a position on it cannot be placed on the host",
+            )
+        }
+        return mapped
+    }
+
+    /**
+     * Gives the SurfaceView the stream's aspect ratio, letterboxing the rest.
+     *
+     * A Surface is stretched to whatever size the view has, so a stream that is
+     * not the panel's shape is otherwise distorted - and, worse for touch, a
+     * stretched picture has no bars but also no honest relationship between a
+     * point on the panel and a point on the PC. The layout already centres the
+     * surface, so shrinking it puts the difference into black bars that
+     * TouchController then knows to ignore.
+     *
+     * Usually a no-op: the host builds its virtual display at the size we asked
+     * for, so the encode matches the panel exactly. Left alone in that case
+     * rather than resized to the same value, because a SurfaceView that
+     * MediaCodec is already rendering into is not free to re-lay-out.
+     */
+    private fun fitSurfaceToVideo(videoWidth: Int, videoHeight: Int) {
+        if (videoWidth <= 0 || videoHeight <= 0) return
+        // displaySize(), not the root view's bounds: that is the box the host
+        // was asked to fit the picture into, and measuring the fit against
+        // anything else invents bars out of the disagreement.
+        val (panelWidth, panelHeight) = displaySize()
+        if (panelWidth <= 0 || panelHeight <= 0) return
+
+        val scale = min(
+            panelWidth.toFloat() / videoWidth,
+            panelHeight.toFloat() / videoHeight,
+        )
+        val fittedWidth = (videoWidth * scale).roundToInt()
+        val fittedHeight = (videoHeight * scale).roundToInt()
+        // A pixel of rounding is not worth a relayout, and not worth a bar.
+        if (abs(fittedWidth - panelWidth) <= 1 && abs(fittedHeight - panelHeight) <= 1) return
+
+        binding.surface.layoutParams = binding.surface.layoutParams.apply {
+            width = fittedWidth
+            height = fittedHeight
         }
     }
 
@@ -295,23 +625,32 @@ class StreamActivity : AppCompatActivity() {
         control?.requestKeyframe()
     }
 
+    /**
+     * A field rather than an anonymous Runnable posted per session, so a codec
+     * fallback can cancel it. Left in flight, the previous session's ticker
+     * reposts itself the moment the retry sets sessionStarted again, and the
+     * screen ends up with two of them pinging forever.
+     */
+    private val statsTicker = object : Runnable {
+        override fun run() {
+            if (!sessionStarted) return
+            updateStats()
+            control?.ping(nowMicros())
+            gamepad.heartbeat()
+            // A keyframe request can itself be lost, and until one lands the
+            // screen stays black with no other symptom. Keep asking.
+            // hasRenderedFrame rather than hasKeyframe: a keyframe accepted
+            // for queueing can still be dropped on the way to the codec, and
+            // then nobody would ever ask for another one.
+            decoder?.let { if (!it.hasRenderedFrame) requestKeyframeThrottled() }
+            handler.postDelayed(this, 1000)
+        }
+    }
+
     private fun startStatsTicker() {
         lastStatsTime = System.currentTimeMillis()
-        handler.post(object : Runnable {
-            override fun run() {
-                if (!sessionStarted) return
-                updateStats()
-                control?.ping(nowMicros())
-                gamepad.heartbeat()
-                // A keyframe request can itself be lost, and until one lands the
-                // screen stays black with no other symptom. Keep asking.
-                // hasRenderedFrame rather than hasKeyframe: a keyframe accepted
-                // for queueing can still be dropped on the way to the codec, and
-                // then nobody would ever ask for another one.
-                decoder?.let { if (!it.hasRenderedFrame) requestKeyframeThrottled() }
-                handler.postDelayed(this, 1000)
-            }
-        })
+        handler.removeCallbacks(statsTicker)
+        handler.post(statsTicker)
     }
 
     private fun updateStats() {
@@ -458,16 +797,53 @@ class StreamActivity : AppCompatActivity() {
         // The host thinks it is streaming and nothing has arrived. Say so: this
         // is the state a blocked video port lands in, and it will never end on
         // its own.
-        if (loadStage == LoadStage.DECODING && !stallReported && inStage > DECODE_STALL_SECONDS) {
-            stallReported = true
-            // Outranks everything: whatever else went wrong, twenty seconds
-            // without a picture is the thing worth telling the user about.
-            showLoadingError(
-                "No video is reaching this handheld",
-                "The game is running on the PC, but no picture has arrived. " +
-                    "The video port is probably blocked by a firewall or by this network.",
-                ERROR_RANK_DIAGNOSED,
-            )
+        if (loadStage == LoadStage.DECODING && !stallReported) {
+            // Reaching here means the ticker has not seen a rendered frame yet.
+            val received = receiver?.framesCompleted ?: 0L
+            // A keyframe that was actually handed to the decoder is the only
+            // evidence that separates a decoder fault from a network one.
+            // framesCompleted cannot: on a lossy link the small P-frames
+            // complete and inflate it while every keyframe - far bigger, spread
+            // over many fragments, all of which VideoReceiver needs - is lost,
+            // so a purely network problem would look exactly like a codec that
+            // cannot decode and would be "fixed" by downgrading for nothing.
+            val keyframeFed = decoder?.hasKeyframe == true
+            val codecName = Protocol.codecName(codecChain[codecIndex])
+            val canFallBack = codecIndex + 1 < codecChain.size
+
+            // A keyframe went in and no picture came out. That is the decoder,
+            // and the codec below may well handle it, so it gets a shorter fuse
+            // than a diagnosis the user can do nothing about anyway.
+            if (keyframeFed && canFallBack && inStage > UNDECODED_SECONDS) {
+                stallReported = true
+                fallBack(
+                    "$codecName is not decoding on this device",
+                    "A keyframe reached the decoder and no picture came out of it.",
+                )
+            } else if (inStage > DECODE_STALL_SECONDS) {
+                stallReported = true
+                // Outranks everything: whatever else went wrong, twenty seconds
+                // without a picture is the thing worth telling the user about.
+                // Three different faults land here and they need three different
+                // answers - the note beside this headline already says how many
+                // frames arrived, so a headline blaming the network while frames
+                // are visibly arriving contradicts the screen it is printed on.
+                val (headline, detail) = when {
+                    received == 0L -> "No video is reaching this handheld" to
+                        "The game is running on the PC, but no picture has arrived. " +
+                        "The video port is probably blocked by a firewall or by this network."
+
+                    !keyframeFed -> "No complete keyframe is getting through" to
+                        "$received frames have arrived, but not one keyframe has arrived whole. " +
+                        "A keyframe is many times the size of the frames around it, so this is " +
+                        "the shape of a lossy or congested network rather than a codec fault."
+
+                    else -> "This handheld is not decoding the stream" to
+                        "$received frames have arrived from the PC and none of them decoded, " +
+                        "including at least one keyframe. $codecName is the last codec left to try."
+                }
+                showLoadingError(headline, detail, ERROR_RANK_DIAGNOSED)
+            }
         }
     }
 
@@ -667,14 +1043,34 @@ class StreamActivity : AppCompatActivity() {
         if (hasFocus) goImmersive()
     }
 
+    /**
+     * Lets go of anything the finger was holding when we lose the foreground.
+     *
+     * ACTION_CANCEL covers the notification shade and Home, but it is not
+     * promised for screen-off, a task swiped away, or a low-memory kill - and a
+     * mouse button left down on the PC is not a fault anything downstream can
+     * recover from, so it gets a second guarantee rather than one.
+     */
+    override fun onPause() {
+        super.onPause()
+        if (::touch.isInitialized) touch.cancel()
+    }
+
     override fun onDestroy() {
         // Everything here happens before super, which cancels lifecycleScope -
-        // and every ordinary send is dispatched on that scope, so a teardown
-        // done afterwards is a teardown the host never hears about.
+        // and the read loop runs on it, so a teardown done afterwards races the
+        // cancellation. Outbound messages are safe either way: they are drained
+        // by ControlConnection's own writer thread, which belongs to no scope.
         sessionStarted = false
         pendingSession = null
         handler.removeCallbacksAndMessages(null)
-        control?.stopSessionAndClose()
+        // Handed to stopSessionAndClose rather than released here: releasing
+        // through the ordinary path queues behind a socket this method is about
+        // to drop, so the release would be written to a null socket and lost -
+        // leaving the left button held on the user's PC with nothing on either
+        // side that would ever let it go.
+        val heldButtons = if (::touch.isInitialized) touch.abandon() else emptyList()
+        control?.stopSessionAndClose(heldButtons)
         receiver?.stop()
         decoder?.stop()
         super.onDestroy()
@@ -691,12 +1087,25 @@ class StreamActivity : AppCompatActivity() {
         // keyframe request is retried every second until it does.
         private const val DECODE_STALL_SECONDS = 20f
 
+        // Shorter, because video is demonstrably arriving and the only question
+        // left is whether this device's decoder can do anything with it. Still
+        // several keyframe requests' worth of patience.
+        private const val UNDECODED_SECONDS = 8f
+
+        // Long enough for the overlay to repaint with the reason before the
+        // teardown blocks the main thread joining threads.
+        private const val FALLBACK_DELAY_MS = 400L
+
         // What may replace what on the overlay, worst-explained to best.
         private const val ERROR_RANK_NONE = -1
         private const val ERROR_RANK_FALLOUT = 0
         private const val ERROR_RANK_REPORTED = 1
         private const val ERROR_RANK_DIAGNOSED = 2
         private const val NO_CONTROLLER = "no game controller detected"
+
+        // The host fits the picture to an even size, so "the size we asked for"
+        // is only ever exact to within a pixel on each axis.
+        private const val SIZE_SLACK = 2
 
         const val EXTRA_HOST = "host"
         const val EXTRA_WINDOW_ID = "windowId"

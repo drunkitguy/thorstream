@@ -40,8 +40,18 @@ object Protocol {
     const val LAUNCH_PROGRESS: Byte = 0x0D
     const val COVER_DATA: Byte = 0x0F
 
+    // Wire values, not preferences: these are the numbers host/src/protocol.h
+    // parses out of START and LAUNCH.
     const val CODEC_H264: Byte = 0
     const val CODEC_HEVC: Byte = 1
+    const val CODEC_AV1: Byte = 2
+
+    /** For the user, and for logs about which codec a session actually used. */
+    fun codecName(codec: Byte): String = when (codec) {
+        CODEC_AV1 -> "AV1"
+        CODEC_HEVC -> "HEVC"
+        else -> "H.264"
+    }
 }
 
 /** XInput button bits; the host injects these straight into a virtual pad. */

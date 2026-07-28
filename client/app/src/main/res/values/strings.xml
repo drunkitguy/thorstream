@@ -13,6 +13,15 @@
     <string name="found_one">Found 1 PC — tap to connect.</string>
     <string name="found_many">Found %1$d PCs — tap one to connect.</string>
     <string name="manual_header">Or connect manually</string>
+    <string name="touch_control">Touch the screen to control the mouse</string>
+    <string name="codec_header">Video codec</string>
+    <string name="codec_auto">Auto</string>
+    <string name="codec_av1">AV1</string>
+    <string name="codec_hevc">HEVC</string>
+    <string name="codec_h264">H.264</string>
+    <!-- The order matters more than the names: it is also the order things are
+         retried in if the PC or this device refuses the first choice. -->
+    <string name="codec_note">Will try %1$s, in that order.</string>
     <string name="connecting">Connecting…</string>
     <string name="unreachable">Could not reach that PC on any address.</string>
     <string name="connected_external">Connected via %1$s</string>

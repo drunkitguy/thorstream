@@ -30,6 +30,24 @@ class MainActivity : AppCompatActivity() {
         binding.externalInput.setText(prefs.getString(KEY_EXTERNAL, ""))
         binding.bitrateInput.setText(prefs.getInt(KEY_BITRATE, 30000).toString())
         binding.fpsInput.setText(prefs.getInt(KEY_FPS, 60).toString())
+        binding.touchCheck.isChecked = prefs.getBoolean(KEY_TOUCH, true)
+        // Written as it is toggled rather than on the way out: the other fields
+        // only matter to a connection being made, but this one is just as often
+        // changed and then backed out of.
+        binding.touchCheck.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean(KEY_TOUCH, checked).apply()
+        }
+
+        // Same reasoning as the touch box: written as it is chosen, because
+        // StreamActivity reads it from here rather than being handed it, and the
+        // external-launch path never comes back through this screen at all.
+        binding.codecGroup.check(codecButtonFor(prefs.getInt(KEY_CODEC, CodecSupport.PREF_AUTO)))
+        showCodecChain(prefs.getInt(KEY_CODEC, CodecSupport.PREF_AUTO))
+        binding.codecGroup.setOnCheckedChangeListener { _, checkedId ->
+            val preference = codecPreferenceFor(checkedId)
+            prefs.edit().putInt(KEY_CODEC, preference).apply()
+            showCodecChain(preference)
+        }
 
         binding.hostList.setOnItemClickListener { _, _, position, _ ->
             discovered.getOrNull(position)?.let { open(listOf(it.address)) }
@@ -147,13 +165,45 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    private fun codecButtonFor(preference: Int): Int = when (preference) {
+        CodecSupport.PREF_AV1 -> R.id.codecAv1
+        CodecSupport.PREF_HEVC -> R.id.codecHevc
+        CodecSupport.PREF_H264 -> R.id.codecH264
+        else -> R.id.codecAuto
+    }
+
+    private fun codecPreferenceFor(buttonId: Int): Int = when (buttonId) {
+        R.id.codecAv1 -> CodecSupport.PREF_AV1
+        R.id.codecHevc -> CodecSupport.PREF_HEVC
+        R.id.codecH264 -> CodecSupport.PREF_H264
+        else -> CodecSupport.PREF_AUTO
+    }
+
+    /**
+     * Spells out what the choice actually means on THIS handheld.
+     *
+     * Auto is the interesting case: the same build runs on a Thor Pro, which has
+     * hardware AV1 decode, and a Thor LITE, which has none, so "Auto" resolves to
+     * something different on each and the user should be able to see which.
+     */
+    private fun showCodecChain(preference: Int) {
+        val chain = CodecSupport.chainFor(preference).joinToString(" → ") { Protocol.codecName(it) }
+        binding.codecNote.text = getString(R.string.codec_note, chain)
+    }
+
     private fun bitrateKbps(): Int =
         binding.bitrateInput.text.toString().toIntOrNull()?.coerceIn(1000, 200_000) ?: 30000
 
     private fun fps(): Int = binding.fpsInput.text.toString().toIntOrNull()?.coerceIn(24, 144) ?: 60
 
     companion object {
-        private const val PREFS = "thorstream"
+        // Read by StreamActivity too: the stream screen can be reached without
+        // passing through here, so the touch setting has to be looked up rather
+        // than carried in an intent.
+        const val PREFS = "thorstream"
+        const val KEY_TOUCH = "touch"
+        const val KEY_CODEC = "codec"
+
         private const val KEY_HOST = "host"
         private const val KEY_EXTERNAL = "external"
         private const val KEY_BITRATE = "bitrate"

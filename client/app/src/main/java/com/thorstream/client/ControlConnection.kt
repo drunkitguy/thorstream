@@ -12,10 +12,20 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.LinkedBlockingQueue
 
 /**
  * The TCP control channel. Owns the socket and pumps inbound messages on a
  * background thread; callbacks arrive off the main thread.
+ *
+ * Outbound messages go through one queue drained by one thread. They used to be
+ * a coroutine each on Dispatchers.IO, which has 64 workers: two messages sent
+ * microseconds apart went to different workers and raced to write(), so frames
+ * could interleave mid-body and desync the host's length-prefixed parser, or
+ * simply arrive out of order. Gamepad packets survived that - the next state
+ * packet overwrites a stale one - but mouse buttons are edges, and a LEFTUP
+ * overtaking its LEFTDOWN latches the button down on the user's PC with nothing
+ * anywhere to let it go again.
  */
 class ControlConnection(private val scope: CoroutineScope) {
 
@@ -31,6 +41,10 @@ class ControlConnection(private val scope: CoroutineScope) {
     private var socket: Socket? = null
     private var readJob: Job? = null
 
+    // Unbounded on purpose: the one thing this queue must never do is drop a
+    // message, because half of the ones it carries are button edges.
+    private val outbound = LinkedBlockingQueue<ByteArray>()
+
     @Volatile
     private var connected = false
 
@@ -43,7 +57,15 @@ class ControlConnection(private val scope: CoroutineScope) {
             s.connect(InetSocketAddress(host, port), timeoutMs)
             s.tcpNoDelay = true
             socket = s
+            outbound.clear()
             connected = true
+            // A plain thread rather than a coroutine on the caller's scope: this
+            // is what lets a teardown message still go out after the activity
+            // that queued it has cancelled its scope.
+            Thread({ writeLoop(s) }, "control-writer").apply {
+                isDaemon = true
+                start()
+            }
             readJob = scope.launch(Dispatchers.IO) { readLoop(s) }
             send(Protocol.HELLO, ProtocolWriter().u16(Protocol.VERSION).str(android.os.Build.MODEL))
         }
@@ -116,34 +138,43 @@ class ControlConnection(private val scope: CoroutineScope) {
     fun stopSession() = send(Protocol.STOP, ProtocolWriter())
 
     /**
-     * Sends STOP and closes, on a thread that belongs to no lifecycle.
+     * Sends STOP and closes, outliving the scope that queued it.
      *
-     * Every other send is dispatched on the caller's scope, which for the stream
-     * screen is cancelled as the activity is destroyed - so a STOP queued there
-     * never runs, and [close] would shut the socket underneath it in any case
-     * since it does not wait. This is the one message that has to outlive its
-     * sender: without it the host goes on encoding for a client that has left.
+     * The writer thread belongs to no lifecycle, so everything already queued
+     * still goes out in order and the socket is closed behind it rather than
+     * underneath it.
+     *
+     * [releaseButtons] are mouse buttons the caller is still holding down.
+     * They are queued here rather than sent through the ordinary path because
+     * this is the one moment that path can be shut down under a message, and a
+     * button left down is not something the host, the protocol or Windows will
+     * ever undo by itself: net_server.cpp injects button edges with no pairing
+     * state, and onReleaseInput only resets the virtual gamepad.
      */
-    fun stopSessionAndClose() {
-        val s = socket ?: return close()
+    fun stopSessionAndClose(releaseButtons: List<Int> = emptyList()) {
+        if (socket == null) {
+            // Nothing to send it down. A button held when the transport died
+            // stays held: the release cannot be delivered from here, and the
+            // host has no release-all to fall back on. Said out loud rather
+            // than dropped quietly, because it is the one case where the
+            // guarantee this method exists to make does not hold.
+            if (releaseButtons.isNotEmpty()) {
+                Log.w(TAG, "connection already down; $releaseButtons left held on the host")
+            }
+            return close()
+        }
+        // No new ordinary sends, but the queue is still drained.
         connected = false
         readJob?.cancel()
         socket = null
-        val frame = frameFor(Protocol.STOP, ProtocolWriter())
-        Thread {
-            try {
-                s.getOutputStream().apply {
-                    write(frame)
-                    flush()
-                }
-            } catch (e: IOException) {
-                Log.w(TAG, "STOP not delivered", e)
-            }
-            try {
-                s.close()
-            } catch (_: IOException) {
-            }
-        }.start()
+
+        for (button in releaseButtons) {
+            outbound.add(
+                frameFor(Protocol.MOUSE_BUTTON, ProtocolWriter().u8(button).u8(0))
+            )
+        }
+        outbound.add(frameFor(Protocol.STOP, ProtocolWriter()))
+        outbound.add(CLOSE_SENTINEL)
     }
 
     fun sendGamepad(state: GamepadState) {
@@ -163,9 +194,23 @@ class ControlConnection(private val scope: CoroutineScope) {
 
     fun ping(clientTimeMicros: Long) = send(Protocol.PING, ProtocolWriter().u64(clientTimeMicros))
 
+    /**
+     * Drops the connection at once, discarding anything still queued.
+     *
+     * Explicitly NOT the graceful flush [stopSessionAndClose] performs. This is
+     * for a link that is already dead or is being abandoned, so the socket is
+     * closed immediately - which is also what brings a read loop parked in
+     * readFully straight out. The queue is emptied before the sentinel goes in
+     * so the writer cannot pick up a frame and then fail it against the socket
+     * that has just gone, which would only produce a misleading "send failed".
+     */
     fun close() {
         connected = false
         readJob?.cancel()
+        // The writer is parked on take(); the sentinel is the only thing that
+        // gets it out. Closing the socket alone would leave it there for good.
+        outbound.clear()
+        outbound.add(CLOSE_SENTINEL)
         try {
             socket?.close()
         } catch (_: IOException) {
@@ -182,19 +227,36 @@ class ControlConnection(private val scope: CoroutineScope) {
         return frame.array()
     }
 
+    /**
+     * Queues a message. Ordering is the whole point: enqueueing is what fixes
+     * the submission order, and exactly one thread ever writes to the socket.
+     */
     private fun send(type: Byte, payload: ProtocolWriter) {
         if (!connected) return
-        val frame = frameFor(type, payload)
+        outbound.add(frameFor(type, payload))
+    }
 
-        scope.launch(Dispatchers.IO) {
+    private fun writeLoop(s: Socket) {
+        try {
+            val out = s.getOutputStream()
+            while (true) {
+                val frame = outbound.take()
+                if (frame === CLOSE_SENTINEL) break
+                out.write(frame)
+                out.flush()
+            }
+        } catch (e: IOException) {
+            Log.w(TAG, "send failed", e)
+            handleDisconnect()
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        } finally {
+            // In a finally, not after the catches: an unchecked throw from a
+            // frame builder or the stream would otherwise take the socket with
+            // it, and this thread is the only thing that ever closes it.
             try {
-                socket?.getOutputStream()?.apply {
-                    write(frame)
-                    flush()
-                }
-            } catch (e: IOException) {
-                Log.w(TAG, "send failed", e)
-                handleDisconnect()
+                s.close()
+            } catch (_: IOException) {
             }
         }
     }
@@ -286,11 +348,24 @@ class ControlConnection(private val scope: CoroutineScope) {
     private fun handleDisconnect() {
         if (!connected) return
         connected = false
+        // A link that died on its own still has to stop the writer, exactly as
+        // the deliberate paths do. A thread parked on take() forever is a GC
+        // root: it retains this connection, its callbacks, and whichever
+        // activity installed them. Nothing else would ever collect it, because
+        // LibraryActivity builds a fresh connection on onRestart and drops the
+        // old reference without closing it - so a host restart or a wifi blip
+        // followed by backgrounding would leak an activity every time.
+        close()
+        // After close, so a handler that inspects the connection is not told
+        // about a disconnect while the object still looks half alive.
         onDisconnected?.invoke()
     }
 
     private companion object {
         const val TAG = "ControlConnection"
         const val MAX_MESSAGE = 1 shl 20
+
+        // Compared by identity, so it can never collide with a real frame.
+        val CLOSE_SENTINEL = ByteArray(0)
     }
 }
