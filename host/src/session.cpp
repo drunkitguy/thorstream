@@ -33,6 +33,16 @@ uint64_t NowMicros() {
             .count());
 }
 
+// The encoder's own CodecName() is internal to encoder_nvenc.cpp, and main.cpp
+// keeps a wide copy for the --encode dump. Serve mode logs wide too.
+const wchar_t* CodecLabel(VideoCodec codec) {
+    switch (codec) {
+        case VideoCodec::Hevc: return L"HEVC";
+        case VideoCodec::Av1: return L"AV1";
+        default: return L"H.264";
+    }
+}
+
 // Zero means "native": no display is created, so there is nothing to check.
 bool ValidateRequestedSize(int width, int height, std::string* error) {
     if (width == 0 && height == 0) return true;
@@ -363,12 +373,18 @@ bool Session::StartSession(const StartRequest& request, int* outWidth, int* outH
         return false;
     }
 
-    // Only AV1 fills this in, and only because its level and tier are picked by
-    // the encoder from the bitrate. If the handheld ever comes up black, this
-    // line is what says whether it was handed something it cannot decode.
-    if (!encoder_->BitstreamDescription().empty()) {
-        wprintf(L"encoder bitstream: %hs\n", encoder_->BitstreamDescription().c_str());
-    }
+    // Codec negotiation happens on the wire and used to leave no trace in the
+    // log at all, so a session could not be told apart from any other after the
+    // fact. Printed for all three codecs, just ahead of the "streaming WxH to
+    // udp port N" line the server emits - a "scaling ... down to ..." line can
+    // land between them when the window is larger than the client asked for.
+    // The bitstream description is AV1-only - its level and tier are picked by
+    // the encoder from the bitrate, and High tier is the difference between a
+    // picture and a black screen on some Android SoCs - so it is appended when
+    // present rather than printed on a line of its own.
+    const std::string& bitstream = encoder_->BitstreamDescription();
+    wprintf(L"encoding %s %dx%d @ %d kbps%hs%hs\n", CodecLabel(settings.codec), width, height,
+            settings.bitrateKbps, bitstream.empty() ? "" : " - ", bitstream.c_str());
 
     framesSent_ = 0;
     bytesSent_ = 0;

@@ -49,6 +49,12 @@ class StreamActivity : AppCompatActivity() {
     private var lastStatsTime = 0L
     private var lastStatsFrames = 0L
     private var lastStatsBytes = 0L
+    // The codec this connection asked for, snapshotted in connect() and carried
+    // through startDecoder - the same byte the decoder was configured with. Not
+    // codecChain[codecIndex], which a fallback advances before the replacement
+    // decoder exists, and not session.codec, which VideoDecoder documents as not
+    // trustworthy. The stats line must never name a codec that is not on screen.
+    private var activeCodecName = ""
 
     private var keyboardVisible = false
     private var selectHeld = false
@@ -328,6 +334,9 @@ class StreamActivity : AppCompatActivity() {
             videoDecoder.start(session, codec)
             decoder = videoDecoder
             sessionStarted = true
+            // Set only once the codec has been accepted, so a refused configure
+            // cannot leave the stats line naming a decoder that never ran.
+            activeCodecName = codecName
             // STARTED is not a picture. This is the stage the complaint was
             // about: the host is streaming but nothing has decoded yet, so the
             // overlay stays until something has.
@@ -462,6 +471,7 @@ class StreamActivity : AppCompatActivity() {
         touchMappable = false
         latencyMillis = -1
         lastStatsFrames = 0
+        activeCodecName = ""
         // Exactly what onDestroy does, and for the same reason: a button can
         // genuinely be down here. A picture that reached the screen retires the
         // overlay, which is what arms touch, so a retry can land mid-drag.
@@ -677,7 +687,15 @@ class StreamActivity : AppCompatActivity() {
         }
 
         val latency = if (latencyMillis >= 0) "${latencyMillis}ms rtt" else "…"
-        setStatus("%.0f fps · %s · %d dropped".format(fps, latency, videoReceiver.framesDropped))
+        // The codec rides along with the numbers rather than being announced
+        // once at startup: this ticker repaints every second and used to wipe
+        // the "Decoding WxH · <codec>" line off the screen before it could be
+        // read. Prefixed, and only the short name - "AV1 · " is four characters
+        // in front of a line that already fits, so nothing is pushed off the
+        // edge of a handheld's overlay.
+        val codec = if (activeCodecName.isEmpty()) "" else "$activeCodecName · "
+        setStatus("%s%.0f fps · %s · %d dropped".format(codec, fps, latency,
+            videoReceiver.framesDropped))
     }
 
     private fun setStatus(message: String) {
