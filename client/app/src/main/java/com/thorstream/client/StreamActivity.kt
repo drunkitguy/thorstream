@@ -101,7 +101,7 @@ class StreamActivity : AppCompatActivity() {
         // for the same reason.
         val prefs = getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE)
         touchEnabled = prefs.getBoolean(MainActivity.KEY_TOUCH, true)
-        codecChain = CodecSupport.chainFor(prefs.getInt(MainActivity.KEY_CODEC, CodecSupport.PREF_AUTO))
+        codecChain = CodecSupport.chainFor(prefs.getInt(MainActivity.KEY_CODEC, CodecSupport.PREF_AV1))
         Log.i(TAG, "codec chain: ${codecChain.joinToString { Protocol.codecName(it) }}")
 
         touch = TouchController(
@@ -148,7 +148,7 @@ class StreamActivity : AppCompatActivity() {
 
         val host = intent.getStringExtra(EXTRA_HOST) ?: return finish()
         val windowId = intent.getLongExtra(EXTRA_WINDOW_ID, 0)
-        val bitrate = intent.getIntExtra(EXTRA_BITRATE, 30000)
+        val bitrate = intent.getIntExtra(EXTRA_BITRATE, MainActivity.DEFAULT_BITRATE_KBPS)
         val fps = intent.getIntExtra(EXTRA_FPS, 60)
 
         val videoReceiver = VideoReceiver { frame -> decoder?.submit(frame) }

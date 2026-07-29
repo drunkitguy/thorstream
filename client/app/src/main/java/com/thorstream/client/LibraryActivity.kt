@@ -21,7 +21,7 @@ class LibraryActivity : AppCompatActivity() {
 
     private lateinit var addresses: List<String>
     private var host: String = ""
-    private var bitrate = 30000
+    private var bitrate = MainActivity.DEFAULT_BITRATE_KBPS
     private var fps = 60
 
     // Set when a front end named a game to start; consumed once.
@@ -33,7 +33,7 @@ class LibraryActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         addresses = intent.getStringArrayListExtra(EXTRA_ADDRESSES)?.toList() ?: emptyList()
-        bitrate = intent.getIntExtra(EXTRA_BITRATE, 30000)
+        bitrate = intent.getIntExtra(EXTRA_BITRATE, MainActivity.DEFAULT_BITRATE_KBPS)
         fps = intent.getIntExtra(EXTRA_FPS, 60)
         autoLaunch = intent.getStringExtra(EXTRA_AUTOLAUNCH)
 

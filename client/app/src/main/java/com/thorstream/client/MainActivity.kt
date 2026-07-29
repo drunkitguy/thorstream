@@ -28,7 +28,7 @@ class MainActivity : AppCompatActivity() {
         val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
         binding.hostInput.setText(prefs.getString(KEY_HOST, ""))
         binding.externalInput.setText(prefs.getString(KEY_EXTERNAL, ""))
-        binding.bitrateInput.setText(prefs.getInt(KEY_BITRATE, 30000).toString())
+        binding.bitrateInput.setText(prefs.getInt(KEY_BITRATE, DEFAULT_BITRATE_KBPS).toString())
         binding.fpsInput.setText(prefs.getInt(KEY_FPS, 60).toString())
         binding.touchCheck.isChecked = prefs.getBoolean(KEY_TOUCH, true)
         // Written as it is toggled rather than on the way out: the other fields
@@ -41,8 +41,8 @@ class MainActivity : AppCompatActivity() {
         // Same reasoning as the touch box: written as it is chosen, because
         // StreamActivity reads it from here rather than being handed it, and the
         // external-launch path never comes back through this screen at all.
-        binding.codecGroup.check(codecButtonFor(prefs.getInt(KEY_CODEC, CodecSupport.PREF_AUTO)))
-        showCodecChain(prefs.getInt(KEY_CODEC, CodecSupport.PREF_AUTO))
+        binding.codecGroup.check(codecButtonFor(prefs.getInt(KEY_CODEC, CodecSupport.PREF_AV1)))
+        showCodecChain(prefs.getInt(KEY_CODEC, CodecSupport.PREF_AV1))
         binding.codecGroup.setOnCheckedChangeListener { _, checkedId ->
             val preference = codecPreferenceFor(checkedId)
             prefs.edit().putInt(KEY_CODEC, preference).apply()
@@ -192,7 +192,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun bitrateKbps(): Int =
-        binding.bitrateInput.text.toString().toIntOrNull()?.coerceIn(1000, 200_000) ?: 30000
+        binding.bitrateInput.text.toString().toIntOrNull()?.coerceIn(1000, 200_000)
+            ?: DEFAULT_BITRATE_KBPS
 
     private fun fps(): Int = binding.fpsInput.text.toString().toIntOrNull()?.coerceIn(24, 144) ?: 60
 
@@ -203,6 +204,14 @@ class MainActivity : AppCompatActivity() {
         const val PREFS = "thorstream"
         const val KEY_TOUCH = "touch"
         const val KEY_CODEC = "codec"
+
+        // AV1 needs far fewer bits than H.264 for the same picture, so the old
+        // 30000 default is both unnecessary and actively harmful here: above
+        // roughly 20 Mbps at 1080p NVENC emits High tier, and High tier AV1 is
+        // not decodable on every Android SoC - a black screen with no other
+        // symptom. 12 Mbps keeps it on Main tier and still looks better than
+        // H.264 did at 30. Raise it in the field if you switch back to H.264.
+        const val DEFAULT_BITRATE_KBPS = 12000
 
         private const val KEY_HOST = "host"
         private const val KEY_EXTERNAL = "external"

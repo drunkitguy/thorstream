@@ -56,8 +56,8 @@
         android:focusable="false"
         android:gravity="center"
         android:orientation="vertical"
-        android:paddingStart="64dp"
-        android:paddingEnd="64dp">
+        android:paddingStart="48dp"
+        android:paddingEnd="48dp">
 
         <TextView
             android:id="@+id/loadingTitle"
@@ -67,47 +67,47 @@
             android:gravity="center"
             android:maxLines="2"
             android:textColor="#FFFFFF"
-            android:textSize="28sp"
+            android:textSize="44sp"
             android:textStyle="bold" />
 
         <ProgressBar
             android:id="@+id/loadingBar"
             style="?android:attr/progressBarStyleHorizontal"
             android:layout_width="match_parent"
-            android:layout_height="10dp"
-            android:layout_marginTop="28dp"
+            android:layout_height="22dp"
+            android:layout_marginTop="36dp"
             android:indeterminate="false"
             android:max="1000"
-            android:maxHeight="10dp"
-            android:minHeight="10dp"
+            android:maxHeight="22dp"
+            android:minHeight="22dp"
             android:progressDrawable="@drawable/loading_progress" />
 
         <TextView
             android:id="@+id/loadingStage"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="22dp"
+            android:layout_marginTop="28dp"
             android:gravity="center"
             android:textColor="#DCE3ED"
-            android:textSize="18sp" />
+            android:textSize="28sp" />
 
         <TextView
             android:id="@+id/loadingDetail"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
+            android:layout_marginTop="14dp"
             android:gravity="center"
             android:textColor="#8A93A0"
-            android:textSize="14sp" />
+            android:textSize="20sp" />
 
         <TextView
             android:id="@+id/loadingError"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
+            android:layout_marginTop="28dp"
             android:gravity="center"
             android:textColor="#FF8A80"
-            android:textSize="16sp"
+            android:textSize="22sp"
             android:visibility="gone" />
 
         <!-- Always shown: leaving is available for the whole wait, not only
@@ -116,11 +116,11 @@
             android:id="@+id/loadingHint"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="28dp"
+            android:layout_marginTop="36dp"
             android:gravity="center"
             android:text="@string/loading_cancel_hint"
             android:textColor="#6C7583"
-            android:textSize="14sp" />
+            android:textSize="17sp" />
 
     </LinearLayout>
 
