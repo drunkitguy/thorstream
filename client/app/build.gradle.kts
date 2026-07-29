@@ -5,6 +5,11 @@ plugins {
 
 android {
     namespace = "com.thorstream.client"
+
+    // Otherwise the output is "app-debug.apk", named after the Gradle module
+    // rather than the thing it is. On a release page next to a host binary and
+    // a Cocoon platform file, that reads as some other project's leftover.
+    base.archivesName = "thorstream-client"
     compileSdk = 35
 
     defaultConfig {
