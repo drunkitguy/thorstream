@@ -58,34 +58,12 @@ class VideoDecoder(private val surface: Surface) {
      */
     fun start(session: SessionInfo, requestedCodec: Byte) {
         val mime = CodecSupport.mimeFor(requestedCodec)
-        val isAv1 = requestedCodec == Protocol.CODEC_AV1
 
         val format = MediaFormat.createVideoFormat(mime, session.width, session.height).apply {
             // SPS/PPS (or VPS/SPS/PPS) in Annex-B form. The host also repeats these
             // inline on every keyframe, so this is belt and braces.
-            //
-            // Never for AV1. What the host puts in that field is a bare
-            // OBU_SEQUENCE_HEADER in low-overhead format, but csd-0 for AV1 is
-            // defined as an AV1CodecConfigurationRecord, so the OBU is either
-            // rejected or misparsed. Synthesising a real record would mean
-            // writing a fixed profile/level/tier prefix, and the tier the
-            // encoder picks changes with the bitrate - Main below ~12 Mbps, High
-            // at 20 - so any constant here breaks the moment the bitrate slider
-            // moves. The encoder sets repeatSeqHdr, so the sequence header
-            // precedes every keyframe in the stream and MediaCodec configures
-            // itself from that instead.
-            if (!isAv1 && session.sequenceHeader.isNotEmpty()) {
+            if (session.sequenceHeader.isNotEmpty()) {
                 setByteBuffer("csd-0", ByteBuffer.wrap(session.sequenceHeader))
-            }
-            if (isAv1) {
-                // AV1 signals colour inside the sequence header, which the
-                // decoder only reaches at the first keyframe. Declaring it up
-                // front stops a studio-range picture being stretched as if it
-                // were full range in the meantime. The host's fullRange defaults
-                // false, so LIMITED is the honest answer - never declare full.
-                setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709)
-                setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED)
-                setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
@@ -93,16 +71,7 @@ class VideoDecoder(private val surface: Surface) {
             setInteger(MediaFormat.KEY_PRIORITY, 0) // realtime
         }
 
-        // By name for AV1 only. createDecoderByType hands back whichever decoder
-        // the device lists first, and on a device that has both that can be the
-        // software one - which will not hold 1080p60 and would be worse than the
-        // H.264 it replaced. H.264 and HEVC keep the original path exactly.
-        val hardwareName = if (isAv1) CodecSupport.hardwareDecoderName(mime) else null
-        val decoder = if (hardwareName != null) {
-            MediaCodec.createByCodecName(hardwareName)
-        } else {
-            MediaCodec.createDecoderByType(mime)
-        }
+        val decoder = MediaCodec.createDecoderByType(mime)
         decoder.setCallback(object : MediaCodec.Callback() {
             override fun onInputBufferAvailable(mc: MediaCodec, index: Int) {
                 availableInputBuffers.add(index)
@@ -196,12 +165,10 @@ class VideoDecoder(private val surface: Surface) {
                     decoder.queueInputBuffer(index, 0, 0, 0, 0)
                     continue
                 }
-                // The frame goes in whole and untouched. For AV1 that is one
-                // complete temporal unit, opened by its OBU_TEMPORAL_DELIMITER,
-                // and the delimiter is part of what the decoder parses - do not
-                // be tempted to strip it. BUFFER_FLAG_CODEC_CONFIG is likewise
-                // never set: an ordinary frame is not configuration data even
-                // when the encoder has repeated the sequence header inside it.
+                // The frame goes in whole and untouched, Annex-B start codes and
+                // all. BUFFER_FLAG_CODEC_CONFIG is never set: an ordinary frame
+                // is not configuration data even when the encoder has repeated
+                // the parameter sets inside it.
                 buffer.put(frame.data)
                 val flags = if (frame.isKeyframe) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
                 decoder.queueInputBuffer(index, 0, frame.data.size, frame.timestampMicros, flags)

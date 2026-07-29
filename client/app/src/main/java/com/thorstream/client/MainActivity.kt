@@ -38,17 +38,6 @@ class MainActivity : AppCompatActivity() {
             prefs.edit().putBoolean(KEY_TOUCH, checked).apply()
         }
 
-        // Same reasoning as the touch box: written as it is chosen, because
-        // StreamActivity reads it from here rather than being handed it, and the
-        // external-launch path never comes back through this screen at all.
-        binding.codecGroup.check(codecButtonFor(prefs.getInt(KEY_CODEC, CodecSupport.PREF_AV1)))
-        showCodecChain(prefs.getInt(KEY_CODEC, CodecSupport.PREF_AV1))
-        binding.codecGroup.setOnCheckedChangeListener { _, checkedId ->
-            val preference = codecPreferenceFor(checkedId)
-            prefs.edit().putInt(KEY_CODEC, preference).apply()
-            showCodecChain(preference)
-        }
-
         binding.hostList.setOnItemClickListener { _, _, position, _ ->
             discovered.getOrNull(position)?.let { open(listOf(it.address)) }
         }
@@ -165,32 +154,6 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun codecButtonFor(preference: Int): Int = when (preference) {
-        CodecSupport.PREF_AV1 -> R.id.codecAv1
-        CodecSupport.PREF_HEVC -> R.id.codecHevc
-        CodecSupport.PREF_H264 -> R.id.codecH264
-        else -> R.id.codecAuto
-    }
-
-    private fun codecPreferenceFor(buttonId: Int): Int = when (buttonId) {
-        R.id.codecAv1 -> CodecSupport.PREF_AV1
-        R.id.codecHevc -> CodecSupport.PREF_HEVC
-        R.id.codecH264 -> CodecSupport.PREF_H264
-        else -> CodecSupport.PREF_AUTO
-    }
-
-    /**
-     * Spells out what the choice actually means on THIS handheld.
-     *
-     * Auto is the interesting case: the same build runs on a Thor Pro, which has
-     * hardware AV1 decode, and a Thor LITE, which has none, so "Auto" resolves to
-     * something different on each and the user should be able to see which.
-     */
-    private fun showCodecChain(preference: Int) {
-        val chain = CodecSupport.chainFor(preference).joinToString(" → ") { Protocol.codecName(it) }
-        binding.codecNote.text = getString(R.string.codec_note, chain)
-    }
-
     private fun bitrateKbps(): Int =
         binding.bitrateInput.text.toString().toIntOrNull()?.coerceIn(1000, 200_000)
             ?: DEFAULT_BITRATE_KBPS
@@ -203,14 +166,12 @@ class MainActivity : AppCompatActivity() {
         // than carried in an intent.
         const val PREFS = "thorstream"
         const val KEY_TOUCH = "touch"
-        const val KEY_CODEC = "codec"
 
-        // AV1 needs far fewer bits than H.264 for the same picture, so the old
-        // 30000 default is both unnecessary and actively harmful here: above
-        // roughly 20 Mbps at 1080p NVENC emits High tier, and High tier AV1 is
-        // not decodable on every Android SoC - a black screen with no other
-        // symptom. 12 Mbps keeps it on Main tier and still looks better than
-        // H.264 did at 30. Raise it in the field if you switch back to H.264.
+        // HEVC needs far fewer bits than H.264 for the same picture, so the old
+        // 30000 default is simply wasted bandwidth here: 12 Mbps at 1080p looks
+        // better through HEVC than 30 did through H.264, and a smaller stream is
+        // a smaller keyframe, which is the thing a congested link actually drops.
+        // Raise it in the field only if the fallback has put you back on H.264.
         const val DEFAULT_BITRATE_KBPS = 12000
 
         private const val KEY_HOST = "host"

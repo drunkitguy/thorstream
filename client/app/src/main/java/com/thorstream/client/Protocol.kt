@@ -44,6 +44,11 @@ object Protocol {
     // parses out of START and LAUNCH.
     const val CODEC_H264: Byte = 0
     const val CODEC_HEVC: Byte = 1
+
+    // The host still speaks this and protocol.h still defines it, so it stays
+    // here where the wire format is written down. Nothing in this client ever
+    // asks for it: see CodecSupport.chain, which is HEVC then H.264 and is the
+    // only thing that decides what goes into START and LAUNCH.
     const val CODEC_AV1: Byte = 2
 
     /** For the user, and for logs about which codec a session actually used. */

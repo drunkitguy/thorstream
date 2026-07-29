@@ -18,6 +18,7 @@ import android.view.SurfaceHolder
 import android.view.View
 import android.view.WindowManager
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.doOnLayout
 import androidx.lifecycle.lifecycleScope
 import com.thorstream.client.databinding.ActivityStreamBinding
 import kotlinx.coroutines.launch
@@ -72,10 +73,11 @@ class StreamActivity : AppCompatActivity() {
     private var pendingSession: SessionInfo? = null
     private var pendingCodec: Byte = Protocol.CODEC_H264
 
-    // The codecs to try, best first, and where we are in that list. Fixed in
-    // onCreate: the chain is a property of this device and this user's setting,
-    // and it must not change underneath a retry.
-    private var codecChain: List<Byte> = listOf(Protocol.CODEC_H264)
+    // The codecs to try, best first, and where we are in that list. HEVC is what
+    // this client asks for - always, on every device - and H.264 is only ever
+    // reached by fallBack. Nothing chooses between them and nothing may change
+    // the list underneath a retry, which is why it is a val.
+    private val codecChain: List<Byte> = CodecSupport.chain
     private var codecIndex = 0
     private var fallbackInFlight = false
 
@@ -87,21 +89,24 @@ class StreamActivity : AppCompatActivity() {
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         goImmersive()
+        goEdgeToEdge()
 
         val title: String = intent.getStringExtra(EXTRA_TITLE) ?: "streaming"
         binding.title.text = title
         binding.loadingTitle.text = title
         startLoading()
+        // The one reading that does not depend on the host ever saying anything.
+        // A stream that never connects produces no progress messages at all, and
+        // that is exactly the case the report came from.
+        binding.loadingOverlay.doOnLayout { logOverlayState("first layout") }
 
         gamepad = GamepadTracker { state -> control?.sendGamepad(state) }
 
         // Read from the preferences rather than an intent extra: a front end
         // such as Cocoon reaches this screen without passing through the picker
-        // that would otherwise carry the flag. The codec preference is read here
-        // for the same reason.
+        // that would otherwise carry the flag.
         val prefs = getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE)
         touchEnabled = prefs.getBoolean(MainActivity.KEY_TOUCH, true)
-        codecChain = CodecSupport.chainFor(prefs.getInt(MainActivity.KEY_CODEC, CodecSupport.PREF_AV1))
         Log.i(TAG, "codec chain: ${codecChain.joinToString { Protocol.codecName(it) }}")
 
         touch = TouchController(
@@ -260,6 +265,10 @@ class StreamActivity : AppCompatActivity() {
                             "Starting the stream",
                             noteFor(LoadStage.STARTING_STREAM),
                         )
+                        // The host sends no progress messages on this path, so
+                        // this is the reading showLaunchProgress would otherwise
+                        // have taken.
+                        logOverlayState("starting the stream")
                     }
                 }
             } catch (e: Exception) {
@@ -345,6 +354,10 @@ class StreamActivity : AppCompatActivity() {
                 "Waiting for the first frame",
                 "Decoding ${session.width}x${session.height} · $codecName",
             )
+            // Both paths pass through here, and this is the moment the report was
+            // about: the host is streaming, nothing has decoded, and the overlay
+            // is the only thing that should be on the panel.
+            logOverlayState("waiting for the first frame")
             // Anything the host sent before this moment went nowhere, including
             // the keyframe the stream opened with. Ask for a fresh one rather
             // than waiting for a decoder that will never produce a picture.
@@ -368,8 +381,8 @@ class StreamActivity : AppCompatActivity() {
      * Whether an ERROR from the host is a refusal of THIS codec.
      *
      * The host has exactly two ways of saying that: an unrecognised codec byte
-     * ("this host does not know codec 2 ..."), and a GPU that knows the codec
-     * but cannot encode it ("NVENC: this GPU cannot encode AV1 ..."). The second
+     * ("this host does not know codec 1 ..."), and a GPU that knows the codec
+     * but cannot encode it ("NVENC: this GPU cannot encode HEVC ..."). The second
      * names the codec deliberately, and that name is the whole test.
      *
      * Deliberately NOT the "NVENC: " prefix or the word "encoder". The host puts
@@ -390,7 +403,6 @@ class StreamActivity : AppCompatActivity() {
 
     /** The host writes one of these; the others are here so it may change its mind. */
     private fun spellingsOf(codec: Byte): List<String> = when (codec) {
-        Protocol.CODEC_AV1 -> listOf("av1", "av01")
         Protocol.CODEC_HEVC -> listOf("hevc", "h.265", "h265")
         else -> listOf("h.264", "h264", "avc")
     }
@@ -398,9 +410,9 @@ class StreamActivity : AppCompatActivity() {
     /**
      * Drops to the next codec down and starts the session again.
      *
-     * Bounded by construction: the chain is fixed at onCreate and the index only
-     * ever moves forwards, so the worst case is AV1, then HEVC, then H.264, then
-     * an honest error. Nothing here can loop.
+     * Bounded by construction: the chain is a val and the index only ever moves
+     * forwards, so the worst case is HEVC, then H.264, then an honest error.
+     * Nothing here can loop.
      */
     private fun fallBack(headline: String, detail: String) {
         if (isFinishing || isDestroyed) return
@@ -690,9 +702,9 @@ class StreamActivity : AppCompatActivity() {
         // The codec rides along with the numbers rather than being announced
         // once at startup: this ticker repaints every second and used to wipe
         // the "Decoding WxH · <codec>" line off the screen before it could be
-        // read. Prefixed, and only the short name - "AV1 · " is four characters
-        // in front of a line that already fits, so nothing is pushed off the
-        // edge of a handheld's overlay.
+        // read. Prefixed, and only the short name - "HEVC · " is a handful of
+        // characters in front of a line that already fits, so nothing is pushed
+        // off the edge of a handheld's screen.
         val codec = if (activeCodecName.isEmpty()) "" else "$activeCodecName · "
         setStatus("%s%.0f fps · %s · %d dropped".format(codec, fps, latency,
             videoReceiver.framesDropped))
@@ -753,6 +765,7 @@ class StreamActivity : AppCompatActivity() {
 
     /** Maps the host's progress strings (host/src/session.cpp) onto bar stages. */
     private fun showLaunchProgress(message: String) {
+        logOverlayState("progress: $message")
         val label: String = message.trimEnd('.', '…', ' ').ifEmpty { message }
         val stage: LoadStage? = when {
             message.startsWith("Unlocking", ignoreCase = true) -> LoadStage.UNLOCKING
@@ -769,6 +782,41 @@ class StreamActivity : AppCompatActivity() {
             return
         }
         enterStage(stage, label, noteFor(stage))
+    }
+
+    /**
+     * Says which of three things is true when the user reports a black screen.
+     *
+     * A photograph cannot tell them apart and neither can reading the layout,
+     * which is why this ships rather than a guess at a fix:
+     *
+     *  1. The overlay was never laid out - zero size, detached, or hidden by an
+     *     ancestor. Read `shown=false` with a zero size, or a size that does not
+     *     match the root's.
+     *  2. It was laid out correctly and is being composited under the video
+     *     surface. Read `shown=true`, a size equal to the root's, and the user
+     *     still seeing black.
+     *  3. It is on screen and empty, which looks identical to the second case.
+     *     Read the text lengths: an overlay with nothing written on it is a
+     *     dark rectangle and nothing more.
+     *
+     * Everything here is read back from the view rather than restated from what
+     * this class asked for, so any line of it is free to contradict us - which
+     * is the only reason to log it. isShown rather than visibility: it folds in
+     * every ancestor, and an ancestor is one of the ways case 1 happens.
+     */
+    private fun logOverlayState(reason: String) {
+        val overlay = binding.loadingOverlay
+        val root = binding.root
+        Log.i(
+            TAG,
+            "overlay [$reason]: shown=${overlay.isShown} attached=${overlay.isAttachedToWindow} " +
+                "size=${overlay.width}x${overlay.height} root=${root.width}x${root.height} " +
+                "z=${overlay.z} loadingVisible=$loadingVisible " +
+                "text: title=${binding.loadingTitle.text.length} " +
+                "stage=${binding.loadingStage.text.length} " +
+                "detail=${binding.loadingDetail.text.length}",
+        )
     }
 
     private fun noteFor(stage: LoadStage): String = when (stage) {
@@ -1054,6 +1102,28 @@ class StreamActivity : AppCompatActivity() {
                 or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
                 or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
             )
+    }
+
+    /**
+     * Lets the window reach the physical edges, cutout included.
+     *
+     * Cosmetic, and only that: the video surface and the loading overlay are
+     * match_parent siblings in the same window and are always given identical
+     * bounds, so neither can be short of the other whatever the window's size.
+     * What this changes is the window itself - the default cutout mode lays it
+     * out clear of a notch, letterboxing a fullscreen game away from the top of
+     * the panel. SHORT_EDGES puts it under the cutout instead, and nothing on
+     * either layer lives in the corners for the notch to eat.
+     */
+    private fun goEdgeToEdge() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return
+        // getAttributes hands back the window's live LayoutParams, so this is a
+        // mutation in place; the assignment is how the change is published to
+        // the window manager, not a swap for a different object.
+        window.attributes = window.attributes.apply {
+            layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
